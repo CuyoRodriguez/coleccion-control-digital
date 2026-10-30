@@ -625,12 +625,13 @@ def html_animacion(trayectoria, multiplicador):
     div = fig.to_html(full_html=False, include_plotlyjs='cdn', div_id='anim_brazo', auto_play=False,
                       config=dict(responsive=True, displaylogo=False))
     return f"""
+<meta charset="utf-8">
 <style>
-  html, body {{ margin: 0; background: transparent; font-family: 'Source Sans', sans-serif; }}
+  html, body {{ margin: 0; background: transparent; font-family: 'Source Sans', sans-serif; overflow: hidden; }}
   .fila {{ display: flex; gap: 12px; align-items: flex-start; }}
   .controles {{ flex: 1.5; min-width: 0; display: flex; flex-direction: column; gap: 12px; padding-top: 52px; }}
   .grafica {{ flex: 10.5; min-width: 0; }}
-  .btn {{ width: 100%; min-height: 56px; padding: 0 6px; border-radius: 8px; font-size: 15px; cursor: pointer;
+  .btn {{ width: 100%; min-height: 56px; padding: 0 6px; border-radius: 8px; font-size: 14px; white-space: nowrap; cursor: pointer;
           transition: transform 160ms ease, box-shadow 160ms ease, border-color 160ms ease; }}
   .btn:hover {{ transform: translateY(-2px); }}
   .play {{ border: 1px solid #38bdf8; background: #38bdf8; color: #0f172a; font-weight: 700; }}
@@ -833,7 +834,7 @@ cuadro_actual = min(st.session_state.cuadro_sel, max(len(cuadros) - 1, 0))
 if animar:
     # Animación nativa: se envía una sola vez y el navegador reproduce los frames (sin reruns ni parpadeo)
     with ui_grafica_robot:
-        components.html(html_animacion(cuadros, multiplicador_velocidad), height=580)
+        components.html(html_animacion(cuadros, multiplicador_velocidad), height=600)
 else:
     mostrar_plano(ui_grafica_robot, cuadro_actual)
 
