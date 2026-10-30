@@ -62,27 +62,102 @@ st.markdown("""
 
 [data-testid="stAppViewContainer"],
 [data-testid="stMain"] {
-    background: #0f172a;
+    background: #0a0e17;
     color: #f8fafc;
 }
 
+[data-testid="stHeader"] {
+    background: #0a0e17;
+}
+
 [data-testid="stAppViewContainer"] h1,
-[data-testid="stAppViewContainer"] h2,
-[data-testid="stAppViewContainer"] h3,
 [data-testid="stAppViewContainer"] p,
 [data-testid="stAppViewContainer"] label,
 [data-testid="stAppViewContainer"] [data-testid="stMarkdownContainer"] {
     color: #f8fafc;
 }
 
+[data-testid="stAppViewContainer"] h2,
+[data-testid="stAppViewContainer"] h3,
+[data-testid="stAppViewContainer"] h2 *,
+[data-testid="stAppViewContainer"] h3 * {
+    color: #38bdf8 !important;
+}
+
 [data-testid="stVerticalBlockBorderWrapper"] {
-    border-color: #475569;
-    border-radius: 12px;
-    background: #1e293b;
+    border-color: #1f2937;
+    border-radius: 10px;
+    background: #111827;
+}
+
+[data-testid="stSlider"] [role="slider"] {
+    background-color: #38bdf8 !important;
+    box-shadow: none !important;
+}
+
+[data-testid="stSlider"] [data-baseweb="slider"] > div > div:first-child > div:first-child {
+    background: #38bdf8 !important;
+}
+
+[data-testid="stSliderThumbValue"],
+[data-testid="stSliderTickBarMin"],
+[data-testid="stSliderTickBarMax"] {
+    color: #38bdf8 !important;
+}
+
+[data-testid="stRadio"] label[data-baseweb="radio"] > div:first-child {
+    border-color: #38bdf8 !important;
+}
+
+[data-testid="stRadio"] label[data-baseweb="radio"] > div:first-child > div {
+    background-color: #38bdf8 !important;
+}
+
+[data-testid="stCheckbox"] label[data-baseweb="checkbox"] > span:first-child {
+    border-color: #38bdf8 !important;
+}
+
+[data-testid="stCheckbox"] input:checked + div {
+    background-color: #38bdf8 !important;
+    border-color: #38bdf8 !important;
+}
+
+button[data-testid="stBaseButton-primary"] {
+    border: 1px solid #38bdf8 !important;
+    border-radius: 10px !important;
+    background: #38bdf8 !important;
+    color: #0f172a !important;
+    font-weight: 700 !important;
+}
+
+button[data-testid="stBaseButton-primary"] p {
+    color: #0f172a !important;
+    font-weight: 700 !important;
+}
+
+button[data-testid="stBaseButton-primary"]:hover {
+    border-color: #7dd3fc !important;
+    background: #7dd3fc !important;
+}
+
+[data-testid="stMain"] button[data-testid="stBaseButton-secondary"] {
+    border: 1px solid #374151 !important;
+    border-radius: 10px !important;
+    background: #1e293b !important;
+    color: #f3f4f6 !important;
+}
+
+[data-testid="stMain"] button[data-testid="stBaseButton-secondary"] p {
+    color: #f3f4f6 !important;
+}
+
+[data-testid="stMain"] button[data-testid="stBaseButton-secondary"]:hover {
+    border-color: #38bdf8 !important;
+    background: #273449 !important;
 }
 
 [data-testid="stSidebar"] {
-    background: #1e293b;
+    background: #0f172a;
 }
 
 [data-testid="stSidebar"] button,
