@@ -834,7 +834,7 @@ cuadro_actual = min(st.session_state.cuadro_sel, max(len(cuadros) - 1, 0))
 if animar:
     # Animación nativa: se envía una sola vez y el navegador reproduce los frames (sin reruns ni parpadeo)
     with ui_grafica_robot:
-        components.html(html_animacion(cuadros, multiplicador_velocidad), height=600)
+        components.html(html_animacion(cuadros, multiplicador_velocidad), height=640)
 else:
     mostrar_plano(ui_grafica_robot, cuadro_actual)
 
