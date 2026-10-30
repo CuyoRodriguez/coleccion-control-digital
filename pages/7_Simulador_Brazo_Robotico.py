@@ -62,12 +62,12 @@ st.markdown("""
 
 [data-testid="stAppViewContainer"],
 [data-testid="stMain"] {
-    background: #0a0e17;
+    background: #131c2e;
     color: #f8fafc;
 }
 
 [data-testid="stHeader"] {
-    background: #0a0e17;
+    background: #131c2e;
 }
 
 [data-testid="stAppViewContainer"] h1,
@@ -85,12 +85,12 @@ st.markdown("""
 }
 
 [data-testid="stVerticalBlockBorderWrapper"] {
-    border-color: #1f2937;
+    border-color: #2f3f5c;
     border-radius: 10px;
-    background: #111827;
+    background: #1b263b;
 }
 
-[data-testid="stSlider"] [role="slider"] {
+[data-testid="stSlider"] [role="group"] > div[data-orientation] > div:nth-child(2) {
     background-color: #38bdf8 !important;
     box-shadow: none !important;
 }
@@ -105,14 +105,42 @@ st.markdown("""
     color: #38bdf8 !important;
 }
 
-[data-testid="stRadio"] label[data-baseweb="radio"] > div:first-child {
-    border-color: #38bdf8 !important;
+[data-testid="stRadioGroup"] {
+    gap: 10px;
 }
 
-[data-testid="stRadio"] label[data-baseweb="radio"] > div:first-child > div {
-    background-color: #38bdf8 !important;
+[data-testid="stRadioOption"] {
+    margin: 0;
+    padding: 10px 18px;
+    border: 1px solid #2f3f5c;
+    border-radius: 12px;
+    background: #223048;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
+    cursor: pointer;
+    transition: transform 160ms ease, border-color 160ms ease, background 160ms ease, box-shadow 160ms ease;
 }
 
+[data-testid="stRadioOption"] > div > div:first-child:not([data-testid]) {
+    display: none !important;
+}
+
+[data-testid="stRadioOption"]:hover {
+    transform: translateY(-2px);
+    border-color: #38bdf8;
+    background: #2a3b58;
+    box-shadow: 0 4px 12px rgba(56, 189, 248, 0.2);
+}
+
+[data-testid="stRadioOption"][data-selected="true"] {
+    border-color: #38bdf8;
+    background: linear-gradient(135deg, rgba(56, 189, 248, 0.28), rgba(0, 210, 255, 0.12));
+    box-shadow: 0 0 0 1px #38bdf8, 0 4px 14px rgba(56, 189, 248, 0.3);
+}
+
+[data-testid="stRadioOption"][data-selected="true"] p {
+    color: #ffffff !important;
+    font-weight: 700;
+}
 [data-testid="stCheckbox"] label[data-baseweb="checkbox"] > span:first-child {
     border-color: #38bdf8 !important;
 }
