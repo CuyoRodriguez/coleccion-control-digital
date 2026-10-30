@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 from matplotlib.figure import Figure
 from matplotlib.patches import Circle, Rectangle
 
@@ -613,15 +614,38 @@ def figura_animacion(trayectoria, multiplicador, pasos_por_frame=4):
         data=[go.Scatter(x=ideal[:k + 1, 0], y=ideal[:k + 1, 1]),
               go.Scatter(x=real[:k + 1, 0], y=real[:k + 1, 1]),
               go.Scatter(x=[0, x_b[1][k], x_b[2][k]], y=[0, y_b[1][k], y_b[2][k]])]) for k in ks]
-    fig.update_layout(title=dict(text='Visualización del Robot'), updatemenus=[dict(
-        type='buttons', direction='left', showactive=False, x=0.0, y=-0.02, xanchor='left', yanchor='top',
-        bgcolor=COLOR_PANEL, bordercolor=COLOR_GRID, font=dict(color=COLOR_TEXTO),
-        buttons=[dict(label='▶ Play', method='animate', args=[None, dict(
-                      frame=dict(duration=duracion_ms, redraw=False), transition=dict(duration=0),
-                      fromcurrent=True, mode='immediate')]),
-                 dict(label='⏸ Pause', method='animate', args=[[None], dict(
-                      frame=dict(duration=0, redraw=False), mode='immediate', transition=dict(duration=0))])])])
-    return fig
+    fig.update_layout(title=dict(text='Visualización del Robot'))
+    return fig, duracion_ms
+
+
+def html_animacion(trayectoria, multiplicador):
+    """Animación Plotly con los botones Play/Pause en una columna a la izquierda de la gráfica.
+    Se incrusta como HTML para poder controlar la animación en el navegador sin reruns."""
+    fig, duracion_ms = figura_animacion(trayectoria, multiplicador)
+    div = fig.to_html(full_html=False, include_plotlyjs='cdn', div_id='anim_brazo', auto_play=False,
+                      config=dict(responsive=True, displaylogo=False))
+    return f"""
+<style>
+  html, body {{ margin: 0; background: transparent; font-family: 'Source Sans', sans-serif; }}
+  .fila {{ display: flex; gap: 12px; align-items: flex-start; }}
+  .controles {{ flex: 1.5; min-width: 0; display: flex; flex-direction: column; gap: 12px; padding-top: 52px; }}
+  .grafica {{ flex: 10.5; min-width: 0; }}
+  .btn {{ width: 100%; min-height: 56px; padding: 0 6px; border-radius: 8px; font-size: 15px; cursor: pointer;
+          transition: transform 160ms ease, box-shadow 160ms ease, border-color 160ms ease; }}
+  .btn:hover {{ transform: translateY(-2px); }}
+  .play {{ border: 1px solid #38bdf8; background: #38bdf8; color: #0f172a; font-weight: 700; }}
+  .play:hover {{ box-shadow: 0 0 14px rgba(56, 189, 248, 0.55); }}
+  .pause {{ border: 1px solid #374151; background: #1e293b; color: #e2e8f0; font-weight: 600; }}
+  .pause:hover {{ border-color: #38bdf8; box-shadow: 0 0 10px rgba(56, 189, 248, 0.25); }}
+</style>
+<div class="fila">
+  <div class="controles">
+    <button class="btn play" onclick="Plotly.animate('anim_brazo', null, {{frame: {{duration: {duracion_ms}, redraw: false}}, transition: {{duration: 0}}, fromcurrent: true, mode: 'immediate'}})">▶ Play</button>
+    <button class="btn pause" onclick="Plotly.animate('anim_brazo', [null], {{frame: {{duration: 0, redraw: false}}, transition: {{duration: 0}}, mode: 'immediate'}})">⏸ Pause</button>
+  </div>
+  <div class="grafica">{div}</div>
+</div>
+"""
 
 
 @st.cache_data
@@ -808,8 +832,8 @@ with slot_slider:
 cuadro_actual = min(st.session_state.cuadro_sel, max(len(cuadros) - 1, 0))
 if animar:
     # Animación nativa: se envía una sola vez y el navegador reproduce los frames (sin reruns ni parpadeo)
-    ui_grafica_robot.plotly_chart(figura_animacion(cuadros, multiplicador_velocidad),
-                                  key=f'anim_{st.session_state.clic_n}_{len(cuadros)}', use_container_width=True)
+    with ui_grafica_robot:
+        components.html(html_animacion(cuadros, multiplicador_velocidad), height=580)
 else:
     mostrar_plano(ui_grafica_robot, cuadro_actual)
 
