@@ -101,6 +101,11 @@ button[data-testid="stSidebarCollapseButton"] svg {
     stroke: #ffffff !important;
 }
 
+[data-testid="stSidebarCollapseButton"] [data-testid="stIconMaterial"] {
+    color: #ffffff !important;
+    visibility: visible !important;
+}
+
 [data-testid="stSidebar"] a[data-testid="stPageLink-NavLink"] {
     padding: 12px 16px;
     border: 1px solid rgba(255, 255, 255, 0.18);
