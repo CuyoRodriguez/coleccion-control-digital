@@ -58,6 +58,13 @@ with module_columns[0]:
         )
     with st.container(border=True):
         st.page_link(
+            "pages/7_Simulador_Brazo_Robotico.py",
+            label="Simulador de Brazo Robótico 2-DOF",
+            icon="🦾",
+            use_container_width=True,
+        )
+    with st.container(border=True):
+        st.page_link(
             "pages/4_Contacto.py",
             label="Mi Correo / Contacto Institucional",
             icon="✉️",
@@ -102,5 +109,11 @@ with st.sidebar:
         "pages/3_Recomendacion_Musical.py",
         label="Recomendación Musical",
         icon="🎵",
+        use_container_width=True,
+    )
+    st.page_link(
+        "pages/7_Simulador_Brazo_Robotico.py",
+        label="Simulador de Brazo Robótico",
+        icon="🦾",
         use_container_width=True,
     )

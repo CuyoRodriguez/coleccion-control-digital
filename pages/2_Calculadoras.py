@@ -89,8 +89,17 @@ def show_system_results(system: control.TransferFunction, formula: str) -> None:
 
 
 st.title("Colección de Calculadoras de Control Digital")
-if st.button("⬅️ Página Central"):
-    st.switch_page("app.py")
+navigation_columns = st.columns(2)
+with navigation_columns[0]:
+    if st.button("⬅️ Página Central"):
+        st.switch_page("app.py")
+with navigation_columns[1]:
+    st.page_link(
+        "pages/7_Simulador_Brazo_Robotico.py",
+        label="Simulador de Brazo Robótico 2-DOF",
+        icon="🦾",
+        use_container_width=True,
+    )
 
 calculator = st.sidebar.selectbox(
     "Selecciona una calculadora",
