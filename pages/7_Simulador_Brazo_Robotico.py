@@ -54,6 +54,69 @@ COLOR_RNA = '#4ade80'
 
 st.set_page_config(layout='wide', page_title='Laboratorio de Control Digital - Brazo 2-DOF')
 
+st.markdown("""
+<style>
+[data-testid="stSidebarNav"] {
+    display: none !important;
+}
+
+[data-testid="stAppViewContainer"],
+[data-testid="stMain"] {
+    background: #0f172a;
+    color: #f8fafc;
+}
+
+[data-testid="stAppViewContainer"] h1,
+[data-testid="stAppViewContainer"] h2,
+[data-testid="stAppViewContainer"] h3,
+[data-testid="stAppViewContainer"] p,
+[data-testid="stAppViewContainer"] label,
+[data-testid="stAppViewContainer"] [data-testid="stMarkdownContainer"] {
+    color: #f8fafc;
+}
+
+[data-testid="stVerticalBlockBorderWrapper"] {
+    border-color: #475569;
+    border-radius: 12px;
+    background: #1e293b;
+}
+
+[data-testid="stSidebar"] {
+    background: #0f172a;
+}
+
+[data-testid="stSidebar"] a[data-testid="stPageLink-NavLink"] {
+    padding: 12px 16px;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.08);
+    color: #f8fafc;
+    text-decoration: none;
+    transition: transform 160ms ease, background 160ms ease, border-color 160ms ease;
+}
+
+[data-testid="stSidebar"] a[data-testid="stPageLink-NavLink"]:hover {
+    transform: translateY(-2px);
+    border-color: rgba(255, 255, 255, 0.35);
+    background: rgba(255, 255, 255, 0.16);
+}
+
+[data-testid="stSidebar"] a[data-testid="stPageLink-NavLink"] span,
+[data-testid="stSidebar"] [data-testid="stMarkdownContainer"],
+[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p {
+    color: #f8fafc;
+}
+</style>
+""", unsafe_allow_html=True)
+
+with st.sidebar:
+    st.page_link("app.py", label="🏠 Página Central", use_container_width=True)
+    st.page_link(
+        "pages/7_Simulador_Brazo_Robotico.py",
+        label="🦾 Simulador Brazo Robótico",
+        use_container_width=True,
+    )
+
 
 # =====================================================================
 # FÍSICA Y MATEMÁTICAS
