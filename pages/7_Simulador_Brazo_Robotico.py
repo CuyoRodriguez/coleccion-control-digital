@@ -175,8 +175,20 @@ button[data-testid="stBaseButton-primary"]:hover {
     color: #f3f4f6 !important;
 }
 
+[data-testid="stMain"] button[data-testid="stBaseButton-secondary"] {
+    min-height: 44px;
+    padding: 0 8px !important;
+    font-weight: 600 !important;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
+}
+
 [data-testid="stMain"] button[data-testid="stBaseButton-secondary"] p {
     color: #f3f4f6 !important;
+    font-size: 0.9rem;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: visible;
+    text-overflow: clip;
 }
 
 [data-testid="stMain"] button[data-testid="stBaseButton-secondary"]:hover {
@@ -473,7 +485,7 @@ with fila1[0]:
 with fila1[1]:
     slot_resumen = st.container()
     b_ejecutar, b_reiniciar, b_reset = st.columns(3)
-    ejecutar = b_ejecutar.button('Ejecutar', type='primary', use_container_width=True)
+    ejecutar = b_ejecutar.button('Ejecutar', use_container_width=True)
     reiniciar = b_reiniciar.button('Reiniciar Brazo', use_container_width=True)
     reset_wp = b_reset.button('Reset Waypoints', use_container_width=True)
     slot_metricas = st.container()
