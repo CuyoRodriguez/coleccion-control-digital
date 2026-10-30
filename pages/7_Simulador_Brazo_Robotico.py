@@ -82,7 +82,23 @@ st.markdown("""
 }
 
 [data-testid="stSidebar"] {
-    background: #0f172a;
+    background: #1e293b;
+}
+
+[data-testid="stSidebar"] button,
+button[aria-controls="stSidebar"],
+button[data-testid="stSidebarCollapseButton"] {
+    border: 1px solid #64748b !important;
+    border-radius: 8px !important;
+    background: #334155 !important;
+    color: #ffffff !important;
+}
+
+[data-testid="stSidebar"] button svg,
+button[aria-controls="stSidebar"] svg,
+button[data-testid="stSidebarCollapseButton"] svg {
+    fill: #ffffff !important;
+    stroke: #ffffff !important;
 }
 
 [data-testid="stSidebar"] a[data-testid="stPageLink-NavLink"] {
