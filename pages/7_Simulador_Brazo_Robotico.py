@@ -34,6 +34,9 @@ PASOS_ASENTAMIENTO = 100   # Pasos extra al terminar la trayectoria
 PASOS_MAX_RL = 300         # Pasos máximos de la política RL por waypoint
 UMBRAL_RL = 0.1            # Distancia (m) para dar un waypoint por alcanzado
 Q_INICIAL = np.array([np.radians(45), np.radians(-45)])
+MAX_OBSTACULOS = 8
+COLOR_OBS = ('rgba(251,191,36,0.30)', '#fbbf24')    # (relleno, borde) libre
+COLOR_OBS_HIT = ('rgba(239,68,68,0.55)', '#ef4444')  # en contacto con el brazo
 
 DIR_APP = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'assets', 'brazo')
 if DIR_APP not in sys.path:
@@ -292,6 +295,37 @@ def calcular_jacobiano(q):
                      [L1 * c1 + L2 * c12, L2 * c12]])
 
 
+def obstaculos_como_array(obstaculos):
+    """Contrato de datos para la futura IA: arreglo (N, 3) float32 con filas (x, y, radio) en metros."""
+    return np.array(obstaculos, dtype=np.float32).reshape(-1, 3)
+
+
+def distancia_segmento_punto(a, b, c):
+    """Distancia del punto c al segmento a-b (a y b: (T, 2); c: (2,))."""
+    ab = b - a
+    largo2 = np.maximum(np.sum(ab * ab, axis=1), 1e-12)
+    t = np.clip(np.sum((c - a) * ab, axis=1) / largo2, 0.0, 1.0)
+    return np.linalg.norm(c - (a + t[:, None] * ab), axis=1)
+
+
+def contactos_obstaculos(qs, obstaculos):
+    """Matriz booleana (T, N): el eslabón 1 o 2 toca (o penetra) el círculo del obstáculo j en el cuadro i.
+    Solo marcado visual: no altera la dinámica."""
+    qs = np.asarray(qs, dtype=float).reshape(-1, 2)
+    if not obstaculos:
+        return np.zeros((len(qs), 0), dtype=bool)
+    xs, ys = fk(qs[:, 0], qs[:, 1])
+    p0 = np.zeros((len(qs), 2))
+    p1 = np.column_stack([xs[1], ys[1]])
+    p2 = np.column_stack([xs[2], ys[2]])
+    cols = []
+    for ox, oy, r in obstaculos:
+        c = np.array([ox, oy], dtype=float)
+        d = np.minimum(distancia_segmento_punto(p0, p1, c), distancia_segmento_punto(p1, p2, c))
+        cols.append(d <= r)
+    return np.column_stack(cols)
+
+
 @st.cache_resource(show_spinner='Cargando modelo RNA...')
 def cargar_rna():
     """Carga la RNA guardada por el simulador de escritorio (no entrena aquí)."""
@@ -453,6 +487,42 @@ def agregar_waypoint(x, y):
     return True
 
 
+def agregar_obstaculo(x, y, r):
+    """Único punto de entrada a la lista de obstáculos circulares (x, y, radio) en metros."""
+    obs = st.session_state.obstaculos
+    if len(obs) >= MAX_OBSTACULOS:
+        return f'Máximo {MAX_OBSTACULOS} obstáculos.'
+    if np.hypot(x, y) - r < 0.5 or np.hypot(x, y) + r > 9.5:
+        return 'El obstáculo debe quedar dentro del plano y sin cubrir la base del brazo.'
+    for w in st.session_state.waypoints:
+        if np.hypot(w[0] - x, w[1] - y) <= r + 0.1:
+            return 'El obstáculo cubriría un waypoint.'
+    obs.append((float(x), float(y), float(r)))
+    return None
+
+
+def obstaculos_aleatorios(r_min=0.4, r_max=1.0):
+    """Sustituye los obstáculos por 2-4 círculos aleatorios que no cubren waypoints ni la base."""
+    rng = np.random.default_rng()
+    st.session_state.obstaculos = []
+    for _ in range(int(rng.integers(2, 5))):
+        for _ in range(50):
+            rad, ang, r = rng.uniform(2.0, 8.0), rng.uniform(-np.pi, np.pi), rng.uniform(r_min, r_max)
+            if agregar_obstaculo(rad * np.cos(ang), rad * np.sin(ang), r) is None:
+                break
+
+
+def actualizar_waypoint_o_obstaculo(x, y):
+    """Clic en el plano: añade un obstáculo o un waypoint según el modo elegido."""
+    if st.session_state.get('clic_obstaculo', False):
+        st.session_state.aviso_obs = agregar_obstaculo(x, y, st.session_state.get('radio_obs', 0.6))
+    else:
+        agregar_waypoint(x, y)
+
+
+if 'obstaculos' not in st.session_state:
+    st.session_state.obstaculos = []  # [(x, y, radio)]
+
 if 'waypoints' not in st.session_state:
     st.session_state.waypoints = []  # [(x, y, theta1, theta2)]
     st.session_state.clic_n = 0      # Cambia la clave del gráfico para limpiar su selección tras cada clic
@@ -513,6 +583,22 @@ with consola:
             wx = cx.number_input('X (m)', -9.0, 9.0, 4.5, 0.1)
             wy = cy.number_input('Y (m)', -9.0, 9.0, 2.7, 0.1)
             anadir = st.button('Añadir Waypoint', use_container_width=True)
+        modo_obs = st.toggle('Modo Obstáculos', key='modo_obs')
+        st.session_state.clic_obstaculo = False
+        anadir_obs = aleatorios = borrar_obs = False
+        if modo_obs:
+            st.slider('Radio del obstáculo (m)', 0.3, 1.5, 0.6, 0.1, key='radio_obs')
+            if interactivo:
+                st.session_state.clic_obstaculo = st.radio(
+                    'Un clic en el plano añade', ('Waypoint', 'Obstáculo'), horizontal=True) == 'Obstáculo'
+            else:
+                ox_c, oy_c = st.columns(2)
+                ox = ox_c.number_input('X obstáculo (m)', -9.0, 9.0, -3.0, 0.1)
+                oy = oy_c.number_input('Y obstáculo (m)', -9.0, 9.0, 4.0, 0.1)
+                anadir_obs = st.button('Añadir Obstáculo', use_container_width=True)
+            b_alea, b_borrar = st.columns(2)
+            aleatorios = b_alea.button('Aleatorios', use_container_width=True)
+            borrar_obs = b_borrar.button('Borrar obstáculos', use_container_width=True)
         aviso_wp = st.container()
         slot_tabla = st.empty()
 
@@ -534,6 +620,22 @@ if anadir:
 
 if reiniciar:
     reiniciar_estado_fisico()
+if borrar_obs:
+    st.session_state.obstaculos = []
+if aleatorios:
+    obstaculos_aleatorios()
+if anadir_obs:
+    st.session_state.aviso_obs = agregar_obstaculo(ox, oy, st.session_state.radio_obs)
+aviso = st.session_state.pop('aviso_obs', None)
+if aviso:
+    aviso_wp.warning(aviso)
+if not modo_obs:
+    obstaculos_activos = ()
+else:
+    obstaculos_activos = tuple(st.session_state.obstaculos)
+if modo == MODO_RL and obstaculos_activos:
+    st.warning('Los modelos RL actuales (v6) no conocen los obstáculos y no los evaden: '
+               'el brazo los atravesará (solo se marcan las colisiones).')
 if reset_wp:
     st.session_state.waypoints = []
     reiniciar_estado_fisico()
@@ -609,11 +711,19 @@ def figura_animacion(trayectoria, multiplicador, pasos_por_frame=4):
     idx = {t.name: i for i, t in enumerate(fig.data)}
     i_ideal, i_brazo = idx['Ruta Ideal (Setpoint)'], idx['Brazo']
     i_real = i_ideal + 1  # la ruta real se añade justo después de la ideal
+    i_obs = [idx[f'Obstáculo {i + 1}'] for i in range(len(obstaculos_activos))]
+    golpes = contactos_obstaculos(qs, obstaculos_activos)
+
+    def estilo_obs(k, j):
+        relleno, borde = COLOR_OBS_HIT if golpes[k, j] else COLOR_OBS
+        return go.Scatter(fillcolor=relleno, line=dict(color=borde, width=2))
+
     fig.frames = [go.Frame(
-        name=str(k), traces=[i_ideal, i_real, i_brazo],
+        name=str(k), traces=[i_ideal, i_real, i_brazo] + i_obs,
         data=[go.Scatter(x=ideal[:k + 1, 0], y=ideal[:k + 1, 1]),
               go.Scatter(x=real[:k + 1, 0], y=real[:k + 1, 1]),
-              go.Scatter(x=[0, x_b[1][k], x_b[2][k]], y=[0, y_b[1][k], y_b[2][k]])]) for k in ks]
+              go.Scatter(x=[0, x_b[1][k], x_b[2][k]], y=[0, y_b[1][k], y_b[2][k]])]
+             + [estilo_obs(k, j) for j in range(len(i_obs))]) for k in ks]
     fig.update_layout(title=dict(text='Visualización del Robot'))
     return fig, duracion_ms
 
@@ -659,6 +769,15 @@ def rejilla_alcanzable():
     return gx[ok], gy[ok]
 
 
+def trazo_obstaculo(i, ox, oy, r, tocado):
+    """Círculo del obstáculo i como polígono relleno (permite cambiar su color dentro de los frames)."""
+    ang = np.linspace(0, 2 * np.pi, 49)
+    relleno, borde = COLOR_OBS_HIT if tocado else COLOR_OBS
+    return dict(x=ox + r * np.cos(ang), y=oy + r * np.sin(ang), mode='lines', fill='toself', fillcolor=relleno,
+                line=dict(color=borde, width=2), name=f'Obstáculo {i + 1}', showlegend=False,
+                hoverinfo='text', text=f'Obstáculo {i + 1}: x={ox:.2f}, y={oy:.2f}, r={r:.2f} m')
+
+
 def figura_plotly(k, interactivo, con_rejilla=True):
     """Plano del robot con Plotly en el cuadro k (clic en el modo interactivo, retícula fina en el manual).
     con_rejilla=False omite la malla invisible de captura de clics (más ligero durante la animación)."""
@@ -670,6 +789,10 @@ def figura_plotly(k, interactivo, con_rejilla=True):
                       line=dict(color=COLOR_GRID, width=1), fillcolor=relleno, layer='below')
 
     hist = cuadros[:k + 1]
+    if obstaculos_activos:
+        golpes = contactos_obstaculos([q], obstaculos_activos)[0]
+        for i, ((ox, oy, r), tocado) in enumerate(zip(obstaculos_activos, golpes)):
+            fig.add_scatter(**trazo_obstaculo(i, ox, oy, r, tocado))
     if hist:
         ideal = ruta_efector([h['q_d'] for h in hist])
         real = ruta_efector([h['q'] for h in hist])
@@ -725,9 +848,9 @@ def mostrar_plano(contenedor, k):
         return
     evento = contenedor.plotly_chart(fig, key=f'plano_clic_{st.session_state.clic_n}', on_select='rerun',
                                      selection_mode='points', use_container_width=True)
-    puntos = evento.selection.points if evento else []
+    puntos = [p for p in (evento.selection.points if evento else []) if p.get('curve_number') == len(fig.data) - 1]
     if puntos:
-        agregar_waypoint(puntos[0]['x'], puntos[0]['y'])
+        actualizar_waypoint_o_obstaculo(puntos[0]['x'], puntos[0]['y'])
         st.session_state.clic_n += 1  # Gráfico nuevo = selección vacía
         st.rerun()
 
@@ -844,6 +967,11 @@ with slot_metricas:
         m_vel, m_sobre = st.columns(2)
         m_vel.metric('Velocidad angular final Σ|q̇|', f'{vel_final:.2f} rad/s')
         m_sobre.metric('Sobreimpulso máximo', f'{sobreimpulso:.2f} m')
+    if len(cuadros) > 1 and obstaculos_activos:
+        golpes = contactos_obstaculos([c['q'] for c in cuadros], obstaculos_activos)
+        m_col, m_pct = st.columns(2)
+        m_col.metric('Colisiones (obstáculos tocados)', f'{int(golpes.any(axis=0).sum())} / {len(obstaculos_activos)}')
+        m_pct.metric('Tiempo en contacto', f'{100 * golpes.any(axis=1).mean():.0f} %')
 
 with slot_resumen:
     xs, ys = fk(q[0], q[1])
