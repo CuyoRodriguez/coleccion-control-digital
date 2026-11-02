@@ -36,6 +36,10 @@ PASOS_MAX_RL = 500         # Pasos máximos de la política RL por waypoint (los
 UMBRAL_RL = 0.1            # Distancia (m) para dar por alcanzado un waypoint intermedio
 UMBRAL_RL_FINAL = 0.04     # Último waypoint: distancia (m) y velocidad (Σdq²) del criterio de éxito del entrenamiento
 VEL2_RL_FINAL = 0.15
+PASOS_ATASCO = 160         # Corte por atasco: pasos seguidos sin mejorar la mejor distancia a la meta ...
+DELTA_ATASCO = 0.01        # ... en al menos este margen (m)
+V_PARADO = 1e-3            # Σ|dq| (rad/s) por debajo del cual el brazo se considera parado ...
+PASOS_PARADO = 25          # ... durante estos pasos seguidos sin haber llegado
 MAX_OBS_ENTRENADOS = 3     # La política v13_c se entrenó con 1-3 obstáculos
 MARGEN_META_RL = 0.5       # Separación mínima (m) meta-borde del obstáculo en las escenas de entrenamiento
 Q_INICIAL = np.array([np.radians(45), np.radians(-45)])
@@ -396,14 +400,24 @@ def construir_trayectoria(q_inicio, waypoints_q):
 
 def simular_rl(estado, waypoints, modelo, obstaculos):
     """Lazo cerrado con la política v13: cada waypoint es la meta; la red recibe los obstáculos (hasta 8) y los
-    sensores virtuales en su observación de 50 valores. Los obstáculos no alteran la dinámica."""
+    sensores virtuales en su observación de 50 valores. Los obstáculos no alteran la dinámica.
+
+    Corte por atasco: se aborta toda la trayectoria si, en un waypoint, (a) el efector no mejora su mejor distancia a
+    la meta en DELTA_ATASCO durante PASOS_ATASCO pasos seguidos, (b) el brazo queda prácticamente parado
+    (Σ|dq| < V_PARADO durante PASOS_PARADO pasos) sin haber llegado, o (c) se agotan PASOS_MAX_RL.
+    Corte por colisión: se aborta en el cuadro exacto en que un eslabón toca un obstáculo (distancia al borde <= 0,
+    como en el entrenamiento); ese cuadro se conserva y el brazo queda en la posición del impacto.
+    El motivo se anota en el último cuadro ('aborto'), de modo que viaja dentro de la caché junto a los cuadros."""
     q, dq = estado['q'].copy(), estado['dq'].copy()
     cuadros, q_d = [], estado['q_d'].copy()
+    aborto = None
 
     for k, (wx, wy, t1, t2) in enumerate(waypoints):
         q_d = np.array([t1, t2])
         meta = np.array([wx, wy])
         ultimo = k == len(waypoints) - 1
+        mejor, sin_mejora, parado = np.inf, 0, 0
+        llego = False
         for _ in range(PASOS_MAX_RL):
             accion = modelo.accion(modelo.observacion(q, dq, meta, obstaculos))
             q, dq, tau, M, G = modelo.paso(q, dq, accion)
@@ -412,12 +426,30 @@ def simular_rl(estado, waypoints, modelo, obstaculos):
                             'M': M, 'G': G, 'rna': None})
             xs, ys = fk(q[0], q[1])
             distancia = float(np.hypot(xs[2] - wx, ys[2] - wy))
-            if ultimo:  # el último waypoint exige llegar y detenerse, como el criterio de éxito del entrenamiento
-                if distancia < UMBRAL_RL_FINAL and float(np.sum(dq ** 2)) < VEL2_RL_FINAL:
-                    break
-            elif distancia < UMBRAL_RL:
+            if obstaculos and contactos_obstaculos([q], obstaculos).any():
+                aborto = {'waypoint': k + 1, 'motivo': 'colision', 'distancia': distancia}
                 break
+            if ultimo:  # el último waypoint exige llegar y detenerse, como el criterio de éxito del entrenamiento
+                llego = distancia < UMBRAL_RL_FINAL and float(np.sum(dq ** 2)) < VEL2_RL_FINAL
+            else:
+                llego = distancia < UMBRAL_RL
+            if llego:
+                break
+            if distancia < mejor - DELTA_ATASCO:
+                mejor, sin_mejora = distancia, 0
+            else:
+                sin_mejora += 1
+            parado = parado + 1 if float(np.sum(np.abs(dq))) < V_PARADO else 0
+            if sin_mejora >= PASOS_ATASCO or parado >= PASOS_PARADO:
+                aborto = {'waypoint': k + 1, 'motivo': 'atasco', 'distancia': distancia}
+                break
+        else:
+            aborto = {'waypoint': k + 1, 'motivo': 'timeout', 'distancia': distancia}
+        if aborto:
+            break
 
+    if aborto and cuadros:
+        cuadros[-1]['aborto'] = aborto
     estado.update(q=q.copy(), dq=dq.copy(), q_d=q_d, err_int=np.zeros(2))
     return cuadros
 
@@ -686,6 +718,12 @@ if ejecutar:
                 obstaculos_activos if modo == MODO_RL else ())
             st.session_state.cuadro_sel = max(len(st.session_state.cuadros) - 1, 0)
             animar = True
+            if st.session_state.cuadros and 'aborto' in st.session_state.cuadros[-1]:
+                if st.session_state.cuadros[-1]['aborto']['motivo'] == 'colision':
+                    st.error('💥 Colisión detectada con obstáculo. Trayectoria abortada.')
+                else:
+                    st.warning('El brazo se atascó o tardó demasiado esquivando obstáculos. '
+                               'Trayectoria abortada por seguridad.')
         except Exception as e:
             st.error(f'No se pudo ejecutar la simulación: {e}')
 
