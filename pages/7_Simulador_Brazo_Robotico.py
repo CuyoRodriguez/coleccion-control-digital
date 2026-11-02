@@ -2,7 +2,8 @@
 
 Ejecutar:  streamlit run app.py
 La física, el PID y la RNA son los mismos de simulador_base_control.py.
-El modo 'Control por RL (PPO)' usa modelo_rl_brazo_v6.zip si existe (si no v2, y si no modelo_rl_brazo.zip).
+El modo 'Control por RL (PPO)' usa la política reactiva v13_c (WIP): red MLP entrenada por DAgger que recibe
+los obstáculos y los sensores virtuales (assets/brazo_v13/politica_v13_c.npz, inferencia en numpy).
 """
 import os
 import sys
@@ -31,20 +32,23 @@ MODO_MANUAL = 'Precisión Manual (Coordenadas)'
 PASO_REJILLA = 0.25        # Separación de los puntos invisibles que reciben el clic/hover (m)
 PASOS_POR_TRAMO = 40       # Interpolación entre waypoints
 PASOS_ASENTAMIENTO = 100   # Pasos extra al terminar la trayectoria
-PASOS_MAX_RL = 300         # Pasos máximos de la política RL por waypoint
-UMBRAL_RL = 0.1            # Distancia (m) para dar un waypoint por alcanzado
+PASOS_MAX_RL = 500         # Pasos máximos de la política RL por waypoint (los mismos que el episodio de entrenamiento)
+UMBRAL_RL = 0.1            # Distancia (m) para dar por alcanzado un waypoint intermedio
+UMBRAL_RL_FINAL = 0.04     # Último waypoint: distancia (m) y velocidad (Σdq²) del criterio de éxito del entrenamiento
+VEL2_RL_FINAL = 0.15
+MAX_OBS_ENTRENADOS = 3     # La política v13_c se entrenó con 1-3 obstáculos
 Q_INICIAL = np.array([np.radians(45), np.radians(-45)])
 MAX_OBSTACULOS = 8
 COLOR_OBS = ('rgba(251,191,36,0.30)', '#fbbf24')    # (relleno, borde) libre
 COLOR_OBS_HIT = ('rgba(239,68,68,0.55)', '#ef4444')  # en contacto con el brazo
 
 DIR_APP = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'assets', 'brazo')
-if DIR_APP not in sys.path:
-    sys.path.insert(0, DIR_APP)
+DIR_APP_V13 = os.path.join(os.path.dirname(DIR_APP), 'brazo_v13')
+for _dir in (DIR_APP, DIR_APP_V13):
+    if _dir not in sys.path:
+        sys.path.insert(0, _dir)
 RUTA_MODELO_RNA = os.path.join(DIR_APP, 'modelo_rna_brazo.pkl')
-RUTA_MODELO_RL = os.path.join(DIR_APP, 'modelo_rl_brazo.zip')
-RUTA_MODELO_RL_V2 = os.path.join(DIR_APP, 'modelo_rl_brazo_v2.zip')
-RUTA_MODELO_RL_V6 = os.path.join(DIR_APP, 'modelo_rl_brazo_v6.zip')
+RUTA_POLITICA_V13 = os.path.join(DIR_APP_V13, 'politica_v13_c.npz')
 
 COLOR_FONDO = '#0f172a'
 COLOR_PANEL = '#1e293b'
@@ -334,27 +338,23 @@ def cargar_rna():
     return joblib.load(RUTA_MODELO_RNA)
 
 
-@st.cache_resource(show_spinner='Cargando modelo RL...')
-def cargar_modelo_ppo(ruta, mtime):
-    """Lee el .zip una sola vez y lo mantiene en RAM. El mtime forma parte de la clave
+@st.cache_resource(show_spinner='Cargando política RL...')
+def cargar_politica_v13(ruta, mtime):
+    """Lee el .npz una sola vez (numpy puro, sin torch). El mtime forma parte de la clave
     para recargar si el modelo se reentrena."""
-    from stable_baselines3 import PPO
-    return PPO.load(ruta, device='cpu')
+    from politica_v13 import PoliticaV13
+    return PoliticaV13(ruta)
 
 
 def cargar_rl():
-    """Devuelve (modelo, error, etiqueta, ruta). Prioriza v6 (control de inercia), luego v2 y v1 si no
-    existe o aún se está escribiendo; si ninguno existe, modelo=None."""
-    error = 'no_encontrado'
-    for ruta, etiqueta in ((RUTA_MODELO_RL_V6, 'v6 (Fine-tuned, frenado)'), (RUTA_MODELO_RL_V2, 'v2 (Fine-tuned)'),
-                           (RUTA_MODELO_RL, 'v1 (300k/1.5M)')):
-        if not os.path.exists(ruta):
-            continue
-        try:
-            return cargar_modelo_ppo(ruta, os.path.getmtime(ruta)), None, etiqueta, ruta
-        except Exception as e:  # modelo incompleto, otra versión, etc.
-            error = str(e)
-    return None, error, None, None
+    """Devuelve (modelo, error, etiqueta, ruta); modelo=None si el archivo no existe o no se puede leer."""
+    if not os.path.exists(RUTA_POLITICA_V13):
+        return None, 'no_encontrado', None, None
+    try:
+        modelo = cargar_politica_v13(RUTA_POLITICA_V13, os.path.getmtime(RUTA_POLITICA_V13))
+        return modelo, None, modelo.version, RUTA_POLITICA_V13
+    except Exception as e:  # archivo incompleto, otra versión, etc.
+        return None, str(e), None, None
 
 
 def metricas_estabilidad(cuadros, waypoints):
@@ -386,38 +386,38 @@ def construir_trayectoria(q_inicio, waypoints_q):
     return trayectoria
 
 
-def simular_rl(estado, waypoints, modelo):
-    """Lazo cerrado con la política PPO: cada waypoint es el objetivo del entorno RL."""
-    from entorno_rl_brazo import BrazoRoboticoEnv
-    env = BrazoRoboticoEnv()
-    env.reset()
-    env.q, env.dq = estado['q'].copy(), estado['dq'].copy()
+def simular_rl(estado, waypoints, modelo, obstaculos):
+    """Lazo cerrado con la política v13: cada waypoint es la meta; la red recibe los obstáculos (hasta 8) y los
+    sensores virtuales en su observación de 50 valores. Los obstáculos no alteran la dinámica."""
+    q, dq = estado['q'].copy(), estado['dq'].copy()
     cuadros, q_d = [], estado['q_d'].copy()
 
-    for wx, wy, t1, t2 in waypoints:
+    for k, (wx, wy, t1, t2) in enumerate(waypoints):
         q_d = np.array([t1, t2])
-        env.objetivo = np.array([wx, wy])
-        env.distancia_prev = float(np.linalg.norm(env._posicion_efector() - env.objetivo))
-        obs = env._obtener_obs()
+        meta = np.array([wx, wy])
+        ultimo = k == len(waypoints) - 1
         for _ in range(PASOS_MAX_RL):
-            accion, _ = modelo.predict(obs, deterministic=True)
-            M, G = calcular_dinamica(env.q)
-            tau = np.clip(G + np.clip(accion, -1, 1) * env.TORQUE_RESIDUAL, -env.TORQUE_MAX, env.TORQUE_MAX)
-            obs, _, _, _, info = env.step(accion)
-            cuadros.append({'q': env.q.copy(), 'q_d': q_d.copy(), 'error': q_d - env.q,
+            accion = modelo.accion(modelo.observacion(q, dq, meta, obstaculos))
+            q, dq, tau, M, G = modelo.paso(q, dq, accion)
+            cuadros.append({'q': q.copy(), 'q_d': q_d.copy(), 'error': q_d - q,
                             'u_pid': np.zeros(2), 'u_ff': np.zeros(2), 'tau': tau,
                             'M': M, 'G': G, 'rna': None})
-            if info['distancia'] < UMBRAL_RL:
+            xs, ys = fk(q[0], q[1])
+            distancia = float(np.hypot(xs[2] - wx, ys[2] - wy))
+            if ultimo:  # el último waypoint exige llegar y detenerse, como el criterio de éxito del entrenamiento
+                if distancia < UMBRAL_RL_FINAL and float(np.sum(dq ** 2)) < VEL2_RL_FINAL:
+                    break
+            elif distancia < UMBRAL_RL:
                 break
 
-    estado.update(q=env.q.copy(), dq=env.dq.copy(), q_d=q_d, err_int=np.zeros(2))
+    estado.update(q=q.copy(), dq=dq.copy(), q_d=q_d, err_int=np.zeros(2))
     return cuadros
 
 
-def simular(estado, waypoints, modo, Kp, Kd, Ki, mlp, modelo_rl):
+def simular(estado, waypoints, modo, Kp, Kd, Ki, mlp, modelo_rl, obstaculos=()):
     """Integra todo el lazo de control y devuelve la lista de cuadros (uno por paso)."""
     if modo == MODO_RL:
-        return simular_rl(estado, waypoints, modelo_rl)
+        return simular_rl(estado, waypoints, modelo_rl, obstaculos)
 
     q, dq = estado['q'].copy(), estado['dq'].copy()
     q_d, err_int = estado['q_d'].copy(), estado['err_int'].copy()
@@ -459,12 +459,13 @@ def simular(estado, waypoints, modo, Kp, Kd, Ki, mlp, modelo_rl):
 
 
 @st.cache_data(max_entries=20, show_spinner='Integrando dinámica...')
-def simular_cacheado(estado, waypoints, modo, Kp, Kd, Ki, _mlp, _modelo_rl, version_modelo):
+def simular_cacheado(estado, waypoints, modo, Kp, Kd, Ki, _mlp, _modelo_rl, version_modelo, obstaculos=()):
     """Versión memoizada de simular(): mismos parámetros => no se recalcula la integración.
     Devuelve (cuadros, estado_final). Los modelos van con '_' (no se hashean); version_modelo
-    (mtime del .zip) invalida la caché si el modelo RL se reentrena."""
+    (mtime del archivo) invalida la caché si el modelo RL se reentrena. `obstaculos` (tupla inmutable) solo
+    se pasa en modo RL, el único que los consume: así mover un obstáculo no invalida las demás simulaciones."""
     estado = {k: v.copy() for k, v in estado.items()}
-    cuadros = simular(estado, waypoints, modo, Kp, Kd, Ki, _mlp, _modelo_rl)
+    cuadros = simular(estado, waypoints, modo, Kp, Kd, Ki, _mlp, _modelo_rl, obstaculos)
     return cuadros, estado
 
 
@@ -565,6 +566,10 @@ with consola:
     col_modo, col_gan, col_wp = st.columns(3)
     with col_modo:
         modo = st.radio('Modo de control', MODOS, index=1, horizontal=True)
+        if modo == MODO_RL:
+            st.warning('⚠️ **Modelo Neuronal Reactivo (WIP / Beta)** · Tasa de éxito sin contacto: ~71 % '
+                       '(escenas de entrenamiento, 1-3 obstáculos circulares estáticos). Agente entrenado con '
+                       'DAgger capaz de evadir obstáculos; aún en desarrollo para escenarios densos.')
     with col_gan:
         Kp = st.slider('Kp', 1.0, 400.0, KP_INICIAL)
         Kd = st.slider('Kd', 0.0, 80.0, KD_INICIAL)
@@ -633,9 +638,10 @@ if not modo_obs:
     obstaculos_activos = ()
 else:
     obstaculos_activos = tuple(st.session_state.obstaculos)
-if modo == MODO_RL and obstaculos_activos:
-    st.warning('Los modelos RL actuales (v6) no conocen los obstáculos y no los evaden: '
-               'el brazo los atravesará (solo se marcan las colisiones).')
+if modo == MODO_RL and len(obstaculos_activos) > MAX_OBS_ENTRENADOS:
+    st.warning(f'La política se entrenó con 1-{MAX_OBS_ENTRENADOS} obstáculos: con {len(obstaculos_activos)} '
+               f'está fuera de su distribución y su comportamiento no es fiable. '
+               f'La red solo percibe los primeros 8; el contacto se marca igualmente.')
 if reset_wp:
     st.session_state.waypoints = []
     reiniciar_estado_fisico()
@@ -660,7 +666,8 @@ if ejecutar:
             version = f'{ruta_rl}|{os.path.getmtime(ruta_rl)}' if modo == MODO_RL else ''
             wps = tuple(tuple(float(v) for v in w) for w in st.session_state.waypoints)
             st.session_state.cuadros, st.session_state.estado = simular_cacheado(
-                st.session_state.estado, wps, modo, float(Kp), float(Kd), float(Ki), mlp, modelo_rl, version)
+                st.session_state.estado, wps, modo, float(Kp), float(Kd), float(Ki), mlp, modelo_rl, version,
+                obstaculos_activos if modo == MODO_RL else ())
             st.session_state.cuadro_sel = max(len(st.session_state.cuadros) - 1, 0)
             animar = True
         except Exception as e:
