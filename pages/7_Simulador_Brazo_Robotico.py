@@ -37,6 +37,7 @@ UMBRAL_RL = 0.1            # Distancia (m) para dar por alcanzado un waypoint in
 UMBRAL_RL_FINAL = 0.04     # Último waypoint: distancia (m) y velocidad (Σdq²) del criterio de éxito del entrenamiento
 VEL2_RL_FINAL = 0.15
 MAX_OBS_ENTRENADOS = 3     # La política v13_c se entrenó con 1-3 obstáculos
+MARGEN_META_RL = 0.5       # Separación mínima (m) meta-borde del obstáculo en las escenas de entrenamiento
 Q_INICIAL = np.array([np.radians(45), np.radians(-45)])
 MAX_OBSTACULOS = 8
 COLOR_OBS = ('rgba(251,191,36,0.30)', '#fbbf24')    # (relleno, borde) libre
@@ -310,6 +311,13 @@ def distancia_segmento_punto(a, b, c):
     largo2 = np.maximum(np.sum(ab * ab, axis=1), 1e-12)
     t = np.clip(np.sum((c - a) * ab, axis=1) / largo2, 0.0, 1.0)
     return np.linalg.norm(c - (a + t[:, None] * ab), axis=1)
+
+
+def waypoints_inalcanzables(waypoints, obstaculos):
+    """Índices (1-based) de los waypoints dentro de un obstáculo o a menos de MARGEN_META_RL de su borde: el
+    entrenamiento nunca incluyó metas así, y la red las intenta hasta agotar los pasos."""
+    return [i + 1 for i, w in enumerate(waypoints)
+            if any(np.hypot(w[0] - ox, w[1] - oy) - r < MARGEN_META_RL for ox, oy, r in obstaculos)]
 
 
 def contactos_obstaculos(qs, obstaculos):
@@ -638,6 +646,12 @@ if not modo_obs:
     obstaculos_activos = ()
 else:
     obstaculos_activos = tuple(st.session_state.obstaculos)
+if modo == MODO_RL and obstaculos_activos:
+    malos = waypoints_inalcanzables(st.session_state.waypoints, obstaculos_activos)
+    if malos:
+        st.error(f'Waypoint(s) {", ".join(map(str, malos))} dentro de un obstáculo o a menos de {MARGEN_META_RL} m '
+                 f'de su borde: la política nunca se entrenó con metas así y no se ejecutará. '
+                 f'Muévelos o elimina el obstáculo.')
 if modo == MODO_RL and len(obstaculos_activos) > MAX_OBS_ENTRENADOS:
     st.warning(f'La política se entrenó con 1-{MAX_OBS_ENTRENADOS} obstáculos: con {len(obstaculos_activos)} '
                f'está fuera de su distribución y su comportamiento no es fiable. '
@@ -660,6 +674,8 @@ if ejecutar:
     elif modo == 'Cinemático con RNA' and mlp is None:
         st.error('No se encontró modelo_rna_brazo.pkl. Ábrelo una vez con simulador_base_control.py.')
     elif modo == MODO_RL and modelo_rl is None:
+        pass  # el aviso ya se mostró arriba
+    elif modo == MODO_RL and waypoints_inalcanzables(st.session_state.waypoints, obstaculos_activos):
         pass  # el aviso ya se mostró arriba
     else:
         try:
