@@ -14,6 +14,7 @@ import plotly.graph_objects as go
 import streamlit as st
 import streamlit.components.v1 as components
 from matplotlib.figure import Figure
+from scipy.signal import cont2discrete
 from matplotlib.patches import Circle, Rectangle
 
 # =====================================================================
@@ -25,6 +26,8 @@ g = 9.81
 dt = 0.02
 
 KP_INICIAL, KD_INICIAL, KI_INICIAL = 150.0, 25.0, 5.0
+B_VISC = 2.0                                    # Fricción viscosa articular (N·m·s/rad), igual que el simulador de escritorio
+MODOS_DINAMICOS = ('PID', 'PID + Feedforward')  # Únicos modos con dinámica: aplica el análisis en el plano z
 MODOS = ('Cinemático', 'PID', 'PID + Feedforward', 'Cinemático con RNA', 'Control por RL (PPO)')
 MODO_RL = MODOS[4]
 MODO_CLIC = 'Clic Interactivo en Gráfica'
@@ -995,6 +998,51 @@ def figura_polos(M):
     return fig
 
 
+def discretizar_lazo_abierto(q, M):
+    """Modelo de 4 estados x = [q1, q2, dq1, dq2] linealizado en q, en lazo abierto, y su discretización ZOH.
+    Devuelve (Phi, Gamma, eigenvalores de Phi, coeficientes de P(z))."""
+    a = m2 * g * L2 * np.sin(q[0] + q[1])
+    Kg = -np.array([[(m1 + m2) * g * L1 * np.sin(q[0]) + a, a],
+                    [a, a]])                       # dG/dq
+    Minv = np.linalg.inv(M)
+    A = np.block([[np.zeros((2, 2)), np.eye(2)],
+                  [-Minv @ Kg, -Minv * B_VISC]])
+    B = np.vstack([np.zeros((2, 2)), Minv])
+    Phi, Gamma, *_ = cont2discrete((A, B, np.eye(4), np.zeros((4, 2))), dt, method='zoh')
+    return Phi, Gamma, np.linalg.eigvals(Phi), np.poly(Phi)
+
+
+def figura_plano_z(q, M):
+    """Eigenvalores de Phi sobre el plano z con el círculo unitario como límite de estabilidad."""
+    _, _, eigs, _ = discretizar_lazo_abierto(q, M)
+    rho = float(np.max(np.abs(eigs)))
+    if rho > 1 + 1e-6:
+        estado, color = 'INESTABLE', COLOR_IDEAL
+    elif rho < 1 - 1e-6:
+        estado, color = 'ESTABLE', COLOR_RNA
+    else:
+        estado, color = 'MARGINAL', '#fbbf24'
+
+    fig = Figure(figsize=(8, 4), facecolor=COLOR_FONDO)
+    ax = fig.subplots()
+    estilizar_ejes(ax)
+    ax.axhline(0, color=COLOR_TEXTO_SEC, lw=1)
+    ax.axvline(0, color=COLOR_TEXTO_SEC, lw=1)
+    ax.add_patch(Circle((0, 0), 1, fill=False, ec=COLOR_ACENTO, ls='--', lw=1.8, label='Círculo unitario'))
+    ax.plot(eigs.real, eigs.imag, 'x', color=color, ms=12, mew=2.8, label='Eigenvalores de Φ')
+    ax.set_xlim(-1.5, 1.5)
+    ax.set_ylim(-1.5, 1.5)
+    ax.set_aspect('equal', adjustable='box')
+    ax.set_xlabel('Re(z)', fontsize=11)
+    ax.set_ylabel('Im(z)', fontsize=11)
+    ax.set_title('Polos Discretos de Lazo Abierto (Plano z)', fontsize=12)
+    ax.text(0.02, 0.96, f'{estado}   máx|z| = {rho:.4f}', transform=ax.transAxes,
+            color=color, fontsize=10, fontweight='bold', va='top')
+    leyenda_oscura(ax, loc='upper right', fontsize=9)
+    fig.tight_layout()
+    return fig
+
+
 # =====================================================================
 # DATOS DEL CUADRO MOSTRADO
 # =====================================================================
@@ -1069,4 +1117,13 @@ with fila3[0]:
     st.pyplot(fig_d, clear_figure=True)
     plt.close(fig_d)
 with fila3[1]:
-    st.pyplot(figura_polos(M), clear_figure=True)
+    if modo in MODOS_DINAMICOS:
+        tab_s, tab_z = st.tabs(['Plano S (Lazo Cerrado)', 'Plano Z (Lazo Abierto)'])
+        with tab_s:
+            st.pyplot(figura_polos(M), clear_figure=True)
+        with tab_z:
+            st.pyplot(figura_plano_z(q, M), clear_figure=True)
+    else:
+        st.info('El análisis de estabilidad en el plano s/z no aplica en modos puramente cinemáticos '
+                'ni en el control por RL: no integran la dinámica del brazo. Selecciona "PID" o '
+                '"PID + Feedforward" para verlo.')
