@@ -268,6 +268,11 @@ with st.sidebar:
         label="🦾 Simulador Brazo Robótico",
         use_container_width=True,
     )
+    st.page_link(
+        "pages/8_Simulador_Brazo_SG90.py",
+        label="🤖 Simulador Brazo SG90 (v0.5)",
+        use_container_width=True,
+    )
 
 
 # =====================================================================

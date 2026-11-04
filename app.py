@@ -65,6 +65,13 @@ with module_columns[0]:
         )
     with st.container(border=True):
         st.page_link(
+            "pages/8_Simulador_Brazo_SG90.py",
+            label="Simulador Brazo SG90 (v0.5, robot real)",
+            icon="🤖",
+            use_container_width=True,
+        )
+    with st.container(border=True):
+        st.page_link(
             "pages/4_Contacto.py",
             label="Mi Correo / Contacto Institucional",
             icon="✉️",
@@ -115,5 +122,11 @@ with st.sidebar:
         "pages/7_Simulador_Brazo_Robotico.py",
         label="Simulador de Brazo Robótico",
         icon="🦾",
+        use_container_width=True,
+    )
+    st.page_link(
+        "pages/8_Simulador_Brazo_SG90.py",
+        label="Simulador Brazo SG90 (v0.5)",
+        icon="🤖",
         use_container_width=True,
     )
