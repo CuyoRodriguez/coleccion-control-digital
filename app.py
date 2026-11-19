@@ -72,6 +72,13 @@ with module_columns[0]:
         )
     with st.container(border=True):
         st.page_link(
+            "pages/9_Robot_4GDL.py",
+            label="Simulador de Brazo 4 GDL",
+            icon="🦾",
+            use_container_width=True,
+        )
+    with st.container(border=True):
+        st.page_link(
             "pages/4_Contacto.py",
             label="Mi Correo / Contacto Institucional",
             icon="✉️",
@@ -128,5 +135,11 @@ with st.sidebar:
         "pages/8_Simulador_Brazo_SG90.py",
         label="Simulador Brazo SG90 (2 GDL)",
         icon="🤖",
+        use_container_width=True,
+    )
+    st.page_link(
+        "pages/9_Robot_4GDL.py",
+        label="Simulador de Brazo 4 GDL",
+        icon="🦾",
         use_container_width=True,
     )

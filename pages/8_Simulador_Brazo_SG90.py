@@ -7,6 +7,7 @@ Los modos Cinemático y PID + Feedforward están activos; PID puro, RNA y RL se 
 Las unidades de posición están en mm; la dinámica se calcula en SI (m, kg, N·m).
 """
 import importlib.util
+import hashlib
 import io
 import json
 import logging
@@ -28,6 +29,7 @@ from matplotlib.patches import Circle, Rectangle
 from assets.reporte_sg90 import informe_html, interfaz_grabacion
 from assets.trayectoria_hmi_sg90 import planificar_recorrido
 from assets.control_vivo_sg90 import ControlVivoSG90
+from assets.hardware_sg90.reproducir_simulacion_sg90 import crear_trayectoria
 
 # =====================================================================
 # PARÁMETROS FÍSICOS Y CONSTANTES (idénticos al simulador de escritorio)
@@ -159,6 +161,11 @@ st.markdown('''
         .st-key-ribbon_sg90 .st-key-abrir_hmi_sg90 [data-testid="stButton"] button {
             width: auto;
             min-width: 6rem;
+            padding: 0.25rem 0.5rem !important;
+        }
+        .st-key-ribbon_sg90 .st-key-acciones_envio [data-testid="stButton"] button {
+            width: 100%;
+            min-width: 0;
             padding: 0.25rem 0.5rem !important;
         }
         .st-key-ribbon_sg90 [data-testid="stButton"] button[data-testid="stBaseButton-secondary"],
@@ -1006,6 +1013,8 @@ def reiniciar_estado_fisico():
     st.session_state.cuadro_sel = 0
     st.session_state.indice_secuencia = 0
     st.session_state.pausa_activa = False
+    for clave in ('robot_inicio_calculado', 'robot_contexto_calculado', 'robot_firma_calculada'):
+        st.session_state.pop(clave, None)
 
 
 def agregar_waypoint(x, y):
@@ -1138,6 +1147,9 @@ def _alternar_ribbon():
 
 
 solicitud_hmi = st.session_state.pop('hmi_accion', None)
+calcular_para_robot = st.session_state.pop('calcular_para_robot', False)
+if calcular_para_robot:
+    reiniciar_estado_fisico()
 abrir_hmi = st.session_state.pop('hmi_reabrir', False) or solicitud_hmi is not None
 if 'hmi_tipo_pendiente' in st.session_state:
     st.session_state.tipo_segmento = st.session_state.pop('hmi_tipo_pendiente')
@@ -1163,7 +1175,7 @@ with st.container(key='ribbon_sg90'):
                 '▶️', help='Ejecutar o reanudar segmentos pendientes; si terminaron, reproducir la trayectoria.',
                 disabled=not hay_pendientes and len(st.session_state.cuadros) < 2,
                 use_container_width=False,
-            ) or solicitud_hmi == 'ejecutar'
+            ) or solicitud_hmi == 'ejecutar' or calcular_para_robot
             b_play.caption('Ejecutar')
             ejecutar = play and hay_pendientes
             reproducir = play and not hay_pendientes
@@ -1183,8 +1195,9 @@ with st.container(key='ribbon_sg90'):
         with col_tiempo:
             slot_slider = st.container()
             multiplicador_velocidad = st.slider(
-                'Velocidad de Simulación (x)', min_value=0.5, max_value=5.0,
-                value=1.0, step=0.5,
+                'Velocidad de reproducción / USB (x)', min_value=0.5, max_value=5.0,
+                value=1.0, step=0.5, key='velocidad_reproduccion',
+                help='Escala los tiempos de la animación y de la trayectoria exportada o enviada por USB; no cambia la integración.',
             )
             st.caption('Línea de tiempo')
         with col_estado:
@@ -1235,7 +1248,7 @@ with st.container(key='ribbon_sg90'):
             st.caption('Inicio')
     with tab_selector_robot:
         with st.container(key='selector_robot_ribbon'):
-            modelo_sg90, modelo_generico = st.columns(2)
+            modelo_sg90, modelo_generico, modelo_4gdl = st.columns(3)
             with modelo_sg90:
                 st.page_link(
                     "pages/8_Simulador_Brazo_SG90.py", label="🤖",
@@ -1248,6 +1261,12 @@ with st.container(key='ribbon_sg90'):
                     help="Abrir el robot de 2 GDL genérico: simulador original del brazo de 9 m.", use_container_width=False,
                 )
                 st.caption('2 GDL · Genérico')
+            with modelo_4gdl:
+                st.page_link(
+                    "pages/9_Robot_4GDL.py", label="4",
+                    help="Abrir el simulador virtual del brazo de 4 GDL.", use_container_width=False,
+                )
+                st.caption('4 GDL · Virtual')
     with st.container(key='ribbon_handle'):
         ribbon_oculto = st.session_state.get('ribbon_oculto', False)
         accion_ribbon = 'Mostrar barra superior' if ribbon_oculto else 'Ocultar barra superior'
@@ -1442,6 +1461,11 @@ if st.session_state.secuencia_operacional:
         use_container_width=True,
     )
 
+contexto_robot = (modo, float(Kp), float(Kd), float(Ki))
+firma_robot = json.dumps(
+    [contexto_robot, st.session_state.secuencia_operacional], ensure_ascii=True, sort_keys=True,
+)
+
 if ejecutar:
     if modo in MODOS_NO_DISPONIBLES:
         st.warning(f'El modo "{modo}" no está disponible para el SG90. Elige Cinemático o PID + Feedforward.')
@@ -1453,6 +1477,13 @@ if ejecutar:
             pausa_anterior = st.session_state.pausa_activa
             st.session_state.pausa_activa = False
             cuadros_nuevos = list(st.session_state.cuadros)
+            inicio_robot = st.session_state.get('robot_inicio_calculado', st.session_state.estado['q']).copy()
+            contexto_calculado = (
+                contexto_robot if not cuadros_nuevos
+                else st.session_state.get('robot_contexto_calculado')
+            )
+            if contexto_calculado != contexto_robot:
+                contexto_calculado = None
             inicio_reproduccion = len(cuadros_nuevos)
             indice = st.session_state.indice_secuencia
             while indice < len(st.session_state.secuencia_operacional):
@@ -1500,6 +1531,9 @@ if ejecutar:
 
             st.session_state.indice_secuencia = indice
             st.session_state.cuadros = cuadros_nuevos
+            st.session_state.robot_inicio_calculado = inicio_robot
+            st.session_state.robot_contexto_calculado = contexto_calculado
+            st.session_state.robot_firma_calculada = firma_robot
             st.session_state.cuadro_sel = min(inicio_reproduccion, max(len(cuadros_nuevos) - 1, 0))
             st.session_state.reproducir_pendiente = True
             if solicitud_hmi:
@@ -1757,7 +1791,10 @@ def html_animacion_grafica(trayectoria, multiplicador):
         config=dict(responsive=True, displaylogo=False, scrollZoom=True),
     )
     nombres_json = json.dumps([str(k) for k in ks])
-    duracion_ms = max(1, int(1000 * dt * PASOS_POR_FRAME / multiplicador))
+    duraciones_json = json.dumps([
+        1000 * dt * ((ks[i + 1] if i + 1 < len(ks) else len(trayectoria)) - k) / multiplicador
+        for i, k in enumerate(ks)
+    ])
     canal = f"sg90-resumen-{st.session_state.get('clic_n', 0)}"
     inicio = (
         next((i for i, k in enumerate(ks) if k >= st.session_state.cuadro_sel), 0)
@@ -1771,18 +1808,20 @@ def html_animacion_grafica(trayectoria, multiplicador):
 <script>
   const grafica = () => document.getElementById('anim_brazo_sg90');
   const nombresFrames = {nombres_json};
+  const duracionesFrames = {duraciones_json};
   const canal = new BroadcastChannel({json.dumps(canal)});
   let iniciado = false;
   let pausado = false;
   let indiceActual = {inicio};
   async function reproducirFrames() {{
     if (iniciado) return;
+    if (!window.Plotly || !grafica() || !grafica()._fullLayout) return;
     iniciado = true;
     const elemento = grafica();
     try {{
       while (indiceActual < nombresFrames.length && !pausado) {{
         await Plotly.animate(elemento, [nombresFrames[indiceActual]], {{
-          frame: {{duration: {duracion_ms}, redraw: false}},
+          frame: {{duration: duracionesFrames[indiceActual], redraw: false}},
           transition: {{duration: 0}},
           mode: 'immediate',
         }});
@@ -1804,7 +1843,7 @@ def html_animacion_grafica(trayectoria, multiplicador):
   }};
   function iniciarCuandoEsteLista(intentos = 0) {{
     const elemento = grafica();
-    if (elemento && elemento._fullLayout) {{
+    if (window.Plotly && elemento && elemento._fullLayout) {{
       canal.postMessage({{type: 'hello'}});
     }}
     else if (intentos < 100) setTimeout(() => iniciarCuandoEsteLista(intentos + 1), 50);
@@ -2486,8 +2525,30 @@ def _leer_hw(nombre):
         return f.read()
 
 
+def _trayectoria_robot_actual():
+    if not st.session_state.secuencia_operacional:
+        return None, 'Sin puntos: usa Control HMI para el mando manual o agrega waypoints a la gráfica.'
+    if any(s['tipo'] == ESTADO_REPOSO for s in st.session_state.secuencia_operacional):
+        return None, 'Reposo es una pausa interactiva sin duración. Retírala antes de exportar o enviar una trayectoria temporizada.'
+    if (not cuadros or st.session_state.indice_secuencia != len(st.session_state.secuencia_operacional)
+            or st.session_state.get('robot_firma_calculada') != firma_robot):
+        return None, 'Primero calcula la secuencia completa. Simular trayectoria recalcula desde el inicio si cambiaste puntos o controlador.'
+    if st.session_state.get('robot_contexto_calculado') != contexto_robot:
+        return None, 'Los cuadros mezclan configuraciones de control. Reinicia y simula toda la secuencia de nuevo.'
+    try:
+        datos = crear_trayectoria(
+            cuadros, st.session_state.robot_inicio_calculado, dt, multiplicador_velocidad, modo,
+        )
+    except ValueError as exc:
+        return None, str(exc)
+    return json.dumps(datos, ensure_ascii=True, allow_nan=False).encode('utf-8'), None
+
+
+trayectoria_robot_json, error_trayectoria_robot = _trayectoria_robot_actual()
+
+
 @st.cache_data
-def _zip_paquete_hw():
+def _zip_paquete_hw(trayectoria_json=None):
     # Estructura que exige el script: hardware/ junto a entorno_entrenamiento_sg90.py;
     # el IDE de Arduino exige que el .ino esté en una carpeta del mismo nombre.
     buf = io.BytesIO()
@@ -2495,7 +2556,30 @@ def _zip_paquete_hw():
         z.writestr('brazo_sg90_export/entorno_entrenamiento_sg90.py', _leer_hw('entorno_entrenamiento_sg90.py'))
         z.writestr('brazo_sg90_export/geometria_bloques_sg90.py', _leer_hw('geometria_bloques_sg90.py'))
         z.writestr('brazo_sg90_export/hardware/enviar_trayectoria_sg90.py', _leer_hw('enviar_trayectoria_sg90.py'))
+        z.writestr('brazo_sg90_export/hardware/reproducir_simulacion_sg90.py', _leer_hw('reproducir_simulacion_sg90.py'))
+        with open(os.path.join(os.path.dirname(DIR_HW), 'control_vivo_sg90.py'), 'rb') as f:
+            z.writestr('brazo_sg90_export/hardware/control_vivo_sg90.py', f.read())
         z.writestr('brazo_sg90_export/hardware/brazo_sg90/brazo_sg90.ino', _leer_hw('brazo_sg90.ino'))
+        if trayectoria_json is not None:
+            z.writestr('brazo_sg90_export/hardware/trayectoria.json', trayectoria_json)
+        z.writestr('brazo_sg90_export/LEEME.txt', (
+            'Reproduccion de la simulacion desde el PC por USB.\n'
+            + ('Incluye trayectoria.json con los angulos y tiempos calculados por la web.\n'
+               if trayectoria_json is not None else
+               'SIN TRAYECTORIA. Agrega puntos, simula y vuelve a exportar para incluirla.\n')
+            + 'El firmware no ejecuta movimientos al descargar ni al cargar el sketch.\n'
+            'Instala Adafruit PWM Servo Driver Library en Arduino IDE y calibra antes de mover.\n'
+            'Conserva la calibracion PWM verificada del robot; el ejemplo usa 1000-2000 us.\n'
+            'En una terminal, desde la carpeta hardware:\n'
+            'python -m pip install pyserial\n'
+            'python reproducir_simulacion_sg90.py --seco\n'
+            'python reproducir_simulacion_sg90.py --puerto COM3\n'
+            'Sustituye COM3 por tu puerto. loop:// es solo eco, no mueve hardware.\n'
+            'El programa pide confirmacion y aplica la pose inicial sin rampa; espera 1 s antes del recorrido.\n'
+            'Iguales consignas y tiempos, redondeadas a grados enteros; no garantiza igual movimiento fisico.\n'
+            'El ACK confirma recepcion, no posicion. Si el serial se retrasa, interrumpe sin recuperar en rafaga.\n'
+            'Ctrl+C detiene el envio, no corta la alimentacion de los servos.\n'
+        ))
     return buf.getvalue()
 
 
@@ -2504,54 +2588,94 @@ def _mostrar_guia_robot(tema):
     st.caption('Cierra con la ×, la tecla Esc o haciendo clic fuera del cuadro.')
     st.warning(
         '**Fuente externa de 5 V y GND común.** No alimentes los servos desde el pin 5 V del Arduino. '
-        'Deja el área despejada: el primer paquete válido mueve el brazo a (90°, 90°).'
+        'La primera orden aplica la pose inicial exportada sin rampa. Verifica la calibración del robot.'
     )
     if tema == 'codigo':
         st.markdown('### Instalación y código')
-        st.caption('2 GDL · 100 + 100 mm · 5°–170° · D9 / D10 · 115200 baudios · 150°/s')
+        st.caption('2 GDL · 100 + 100 mm · 5°–170° · PCA9685 CH0 / CH1 · 115200 baudios')
         st.markdown(
-            '1. Descarga **Paquete** y descomprímelo para conservar la estructura de módulos.\n'
-            '2. Abre `hardware/brazo_sg90/brazo_sg90.ino` en Arduino IDE y cárgalo en la placa. '
-            'D9: hombro; D10: codo.\n'
-            '3. El script necesita `entorno_entrenamiento_sg90.py` en la carpeta superior '
-            'y `geometria_bloques_sg90.py` junto a ese módulo.\n'
-            '4. Instala las dependencias, identifica el puerto y calibra antes de enviar metas. '
+            '1. Agrega puntos y pulsa **Simular para exportar** o **▶️ Ejecutar**. '
+            'Elige **Velocidad de reproducción / USB** y descarga **Paquete**: incluirá `trayectoria.json`.\n'
+            '2. Instala **Adafruit PWM Servo Driver Library** con sus dependencias y abre '
+            '`hardware/brazo_sg90/brazo_sg90.ino` en Arduino IDE. En el Uno, conecta SDA a A4 y SCL a A5; '
+            'hombro al canal 0 y codo al canal 1. VCC es la lógica y V+ va a la fuente externa de los servos.\n'
+            '3. Descomprime el ZIP completo. `reproducir_simulacion_sg90.py` reproduce las muestras calculadas, '
+            'sin volver a resolver IK ni integrar la dinámica.\n'
+            '4. Conserva la calibración PWM verificada del robot e instala pyserial. '
+            'El ejemplo de firmware usa 1000–2000 µs, no presupone que 500–2400 µs sea seguro. '
             'Sustituye `COM3` por tu puerto.'
         )
         st.code(
-            'python -m pip install numpy gymnasium pyserial\n'
+            'python -m pip install pyserial\n'
             'cd brazo_sg90_export\\hardware\n'
-            'python enviar_trayectoria_sg90.py --listar-puertos\n'
-            'python enviar_trayectoria_sg90.py --puerto COM3 --calibrar\n'
-            'python enviar_trayectoria_sg90.py --puerto COM3 --modo cinematico --meta 60,120 --meta 0,150 --meta=-60,120',
+            'python reproducir_simulacion_sg90.py --seco\n'
+            'python reproducir_simulacion_sg90.py --puerto COM3',
             language='powershell',
         )
-        st.caption('Controladores: Cinemático y PID + Feedforward. Trama serial: q1,q2\\n.')
+        st.caption('Descargar no mueve el brazo. El reproductor pide confirmación; sin puntos, el ZIP no incluye trayectoria.')
     else:
         st.markdown('### Envío desde esta página')
         st.markdown(
             '1. Ejecuta la página **en el PC conectado al Arduino por USB**. '
             'La web publicada no puede acceder al USB de tu equipo.\n'
             '2. Carga el firmware y prepara la alimentación según la guía de **Código del robot**.\n'
-            '3. Selecciona **Cinemático** en Análisis de Control para la primera prueba. '
-            'PID + Feedforward es más brusco (atraso simulado de ~31°).\n'
-            '4. Crea una secuencia solo de **posicionamientos**. Las pausas y pasadas A→X '
-            'no se envían al robot físico.\n'
-            '5. Selecciona el puerto, verifica la seguridad y confirma la casilla antes de pulsar **Enviar**.'
+            '3. Añade waypoints en la gráfica, Manual o Control HMI y pulsa **Simular trayectoria**. '
+            'Para la primera prueba elige **Cinemático**.\n'
+            '4. Comprueba el recorrido y la **Velocidad de reproducción / USB**. '
+            'Se envían los cuadros calculados, incluidas curvas HMI y pasadas A→X; '
+            'Reposo no se exporta porque no tiene duración definida.\n'
+            '5. Selecciona el puerto, verifica calibración, alimentación y área despejada, '
+            'y pulsa **Ejecutar en robot · USB**. Sin puntos, usa el mando manual de Control HMI.'
         )
         st.info('El puerto loop:// permite probar la comunicación sin Arduino; no mueve un robot físico.')
         st.warning(
             '**Detener** termina el proceso de envío, pero el robot mantiene la última orden: '
             'no corta la alimentación ni es un paro de emergencia. La pausa de la animación tampoco detiene el robot.'
         )
-        st.caption('Se parte de (90°, 90°) y se limita a 5°–170°. El ACK confirma comandos, no mide la posición física.')
+        st.caption('Se parte de la pose inicial calculada. Las muestras fuera de 5°–170° se rechazan, '
+                   'no se recortan. El ACK no mide la posición física.')
     if st.button('Cerrar guía', key='cerrar_guia_robot'):
         st.rerun()
 
 
 @st.dialog('Asistencia del simulador SG90', width='large')
 def _mostrar_asistencia_simulador():
-    st.caption('Manual ilustrado · Cierra con la ×, Esc o haciendo clic fuera del cuadro.')
+    st.markdown("""
+    <style>
+    [data-testid="stDialog"] [role="dialog"]:has(.st-key-asistencia_sg90) {
+      max-height:calc(100vh - 2rem);max-height:calc(100dvh - 2rem);
+      overflow-y:auto;overscroll-behavior:contain;scrollbar-gutter:stable;
+      background:#0f172a !important;color:#e2e8f0 !important;
+    }
+    [data-testid="stDialog"] [role="dialog"]:has(.st-key-asistencia_sg90) [data-testid="stMarkdownContainer"],
+    [data-testid="stDialog"] [role="dialog"]:has(.st-key-asistencia_sg90) [data-testid="stMarkdownContainer"] p,
+    [data-testid="stDialog"] [role="dialog"]:has(.st-key-asistencia_sg90) [data-testid="stMarkdownContainer"] li,
+    [data-testid="stDialog"] [role="dialog"]:has(.st-key-asistencia_sg90) [data-testid="stMarkdownContainer"] td,
+    [data-testid="stDialog"] [role="dialog"]:has(.st-key-asistencia_sg90) [data-testid="stMarkdownContainer"] th {
+      color:#e2e8f0 !important;
+    }
+    [data-testid="stDialog"] [role="dialog"]:has(.st-key-asistencia_sg90) h1,
+    [data-testid="stDialog"] [role="dialog"]:has(.st-key-asistencia_sg90) h2,
+    [data-testid="stDialog"] [role="dialog"]:has(.st-key-asistencia_sg90) h3,
+    [data-testid="stDialog"] [role="dialog"]:has(.st-key-asistencia_sg90) h4 {
+      color:#f8fafc !important;
+    }
+    [data-testid="stDialog"] [role="dialog"]:has(.st-key-asistencia_sg90) [data-testid="stCaptionContainer"],
+    [data-testid="stDialog"] [role="dialog"]:has(.st-key-asistencia_sg90) [data-testid="stCaptionContainer"] p {
+      color:#b6c2d4 !important;
+    }
+    [data-testid="stDialog"] [role="dialog"]:has(.st-key-asistencia_sg90) [role="tab"],
+    [data-testid="stDialog"] [role="dialog"]:has(.st-key-asistencia_sg90) [role="tab"] p {
+      color:#cbd5e1 !important;
+    }
+    [data-testid="stDialog"] [role="dialog"]:has(.st-key-asistencia_sg90) [role="tab"][aria-selected="true"],
+    [data-testid="stDialog"] [role="dialog"]:has(.st-key-asistencia_sg90) [role="tab"][aria-selected="true"] p {
+      color:#38bdf8 !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+    with st.container(key='asistencia_sg90'):
+        st.caption('Manual ilustrado · Cierra con la ×, Esc o haciendo clic fuera del cuadro.')
     inicio, simulacion, control, resultados, robot, preguntas = st.tabs(
         ['Inicio', 'Simulación y puntos', 'Control y análisis',
          'Gráfica y reportes', 'Robot y seguridad', 'Preguntas frecuentes']
@@ -2598,7 +2722,7 @@ def _mostrar_asistencia_simulador():
             '| ⏹️ Limpiar | Borra toda la secuencia y reinicia el brazo virtual. |\n'
             '| ↺ Reiniciar | Vuelve al estado inicial y vacía la trayectoria, conservando los segmentos. |\n'
             '| Línea de tiempo | Selecciona un cuadro para verlo estático. No avanza en vivo durante la reproducción. |\n'
-            '| Velocidad | Cambia la velocidad de reproducción, no las ganancias ni el paso de integración. |'
+            '| Velocidad | Escala los tiempos de la reproducción visual y USB/exportada, no las ganancias ni el paso de integración. |'
         )
         st.markdown('#### Tipos de segmento')
         st.markdown(
@@ -2623,7 +2747,7 @@ def _mostrar_asistencia_simulador():
             '| Cinemático | Sigue las referencias articulares sin integrar la dinámica; recomendado para explorar trayectorias. |\n'
             '| PID | Permite comparar el efecto de la gravedad; con las ganancias iniciales no sostiene el brazo. |\n'
             '| PID + Feedforward | Añade compensación de gravedad al PID e integra la dinámica. |\n'
-            '| Cinemático con RNA / RL (PPO) | No disponibles para este brazo SG90. |'
+            '| Cinemático con RNA / RL (PPO) | No disponibles aquí; el entrenamiento RL 2-DOF se desarrolla en un entorno separado y no controla hardware. |'
         )
         st.markdown(
             '**Ganancias:** Kp actúa sobre el error, Kd amortigua la velocidad y Ki acumula el error. '
@@ -2657,10 +2781,11 @@ def _mostrar_asistencia_simulador():
             '**0.1 / 0.01 / 0.001** equivalen a **10 / 1 / 0.1 mm**. En Soldadura agrega A y luego X; '
             'Reposo inserta una pausa. La conexión en curvas solo afecta a los nuevos posicionamientos HMI, '
             'nunca a la pasada de soldadura. Puedes cerrar haciendo clic fuera: los segmentos se conservan. '
-            'Los recorridos HMI son virtuales y no se envían al puerto físico. '
+            'Los recorridos HMI se editan virtualmente. Tras simularlos, puedes exportarlos o enviarlos '
+            'desde **Enviar al robot físico (local)** con los mismos tiempos. '
             '**Movimiento en vivo · USB local** permite enviar solo la cruceta e Ir en modo Cinemático, '
             'tras elegir puerto y confirmar el arranque a (90°, 90°). Requiere el firmware de dos servos '
-            'D9/D10, no el de 4 GDL. Cerrar el modal desconecta el puerto, no corta la alimentación.'
+            'PCA9685 CH0/CH1, no el de 4 GDL. Cerrar el modal desconecta el puerto, no corta la alimentación.'
         )
         st.markdown(
             '**Gráfica Plotly:** muestra el brazo y las metas. En modo Clic, selecciona un punto '
@@ -2738,8 +2863,9 @@ def _mostrar_asistencia_simulador():
             )
         with st.expander('RNA, RL o los obstáculos no funcionan aquí'):
             st.write(
-                'No están disponibles en esta página SG90. Las opciones de RNA/RL proceden del proyecto '
-                'del brazo de 9 m y no se pueden reutilizar directamente en este modelo.'
+                'No están disponibles en esta página SG90. El entrenamiento RL 2-DOF se desarrolla en un entorno '
+                'Gymnasium separado; su seguimiento XY por zanahoria y las penalizaciones de movimiento brusco '
+                'aún no están integrados ni validados para controlar el hardware.'
             )
     if st.button('Cerrar asistencia', key='cerrar_asistencia_simulador'):
         st.rerun()
@@ -2761,17 +2887,17 @@ with tab_codigo:
                 st.download_button('⚙', _leer_hw('brazo_sg90.ino'),
                                    file_name='brazo_sg90.ino', mime='text/plain', use_container_width=False,
                                    help='Descargar firmware .ino. Abrir en Arduino IDE dentro de una carpeta llamada brazo_sg90.')
-                st.caption('Arduino')
+                st.caption('Firmware sin trayectoria')
             with c_py:
                 st.download_button('🐍', _leer_hw('enviar_trayectoria_sg90.py'),
                                    file_name='enviar_trayectoria_sg90.py', mime='text/x-python', use_container_width=False,
                                    help='Descargar script Python de envío serial a 115200 baudios. Necesita los módulos del paquete ZIP.')
                 st.caption('Python')
             with c_zip:
-                st.download_button('📦', _zip_paquete_hw(),
+                st.download_button('📦', _zip_paquete_hw(trayectoria_robot_json),
                                    file_name='brazo_sg90_export.zip', mime='application/zip', use_container_width=False,
-                                   help='Descargar firmware y módulos Python en la estructura de carpetas necesaria.')
-                st.caption('Paquete')
+                                   help='Exportar Arduino, reproductor USB y, si está calculada, la trayectoria exacta de la simulación.')
+                st.caption('Exportar trayectoria + Arduino' if trayectoria_robot_json else 'Paquete sin trayectoria')
             st.caption('Descargas')
         with asistencia:
             with st.container():
@@ -2780,18 +2906,26 @@ with tab_codigo:
                 st.caption('Guía')
             st.caption('Asistencia')
         with instrucciones:
+            if trayectoria_robot_json:
+                st.caption(f'Trayectoria incluida · {len(cuadros)} muestras · '
+                           f'{len(cuadros) * dt / multiplicador_velocidad:.2f} s · {multiplicador_velocidad:g}x')
+            else:
+                st.info(error_trayectoria_robot)
+                if st.button('Simular para exportar', key='calcular_exportacion',
+                             disabled=not st.session_state.secuencia_operacional):
+                    st.session_state.calcular_para_robot = True
+                    st.rerun()
             st.warning(
                 '**Fuente externa de 5 V y GND común.** No alimentes los servos desde el pin 5 V del Arduino. '
-                'Deja el área despejada: el primer paquete válido mueve el brazo a (90°, 90°).'
+                'La primera orden aplica la pose inicial exportada sin rampa. La velocidad física depende del servo, '
+                'la carga, la calibración y la rampa del firmware; iguales consignas no garantizan iguales oscilaciones.'
             )
             st.caption('Seguridad')
 
 # =====================================================================
 # ENVIAR AL ROBOT FÍSICO (solo local)
 # =====================================================================
-MODO_A_CLI = {'Cinemático': 'cinematico', 'PID + Feedforward': 'pid_ff'}
 OPCION_LOOP = 'loop:// (prueba sin Arduino)'
-LOG_ROBOT = os.path.join(tempfile.gettempdir(), 'brazo_sg90_envio.log')
 
 
 def _hay_pyserial():
@@ -2813,11 +2947,13 @@ def _robot_activo():
 def _detener_robot():
     proc = st.session_state.get('robot_proc')
     if proc is not None and proc.poll() is None:
+        st.session_state.robot_cancelado = True
         proc.terminate()   # el brazo se queda en la última posición recibida
         try:
             proc.wait(timeout=3)
         except subprocess.TimeoutExpired:
             proc.kill()
+            proc.wait(timeout=3)
 
 
 def _hmi_es_local():
@@ -2830,27 +2966,42 @@ def _hmi_es_local():
     )
 
 
-def _enviar_robot(puerto, modo_cli, waypoints):
+def _enviar_robot(puerto, trayectoria_json):
     if puerto != 'loop://' and not _hmi_es_local():
         raise RuntimeError('El USB físico requiere iniciar Streamlit con --server.address localhost.')
     if st.session_state.get('hmi_enlace_vivo') is not None:
         raise RuntimeError('Desconecta primero el movimiento en vivo del HMI.')
-    script = os.path.join(DIR_HW, 'enviar_trayectoria_sg90.py')
-    # El script busca entorno_entrenamiento_sg90.py en la carpeta superior; aquí está junto a él.
-    env = dict(os.environ, PYTHONPATH=DIR_HW, PYTHONIOENCODING='utf-8')
-    # --meta=x,y con '=': un x negativo se confundiría con una opción
-    cmd = [sys.executable, '-u', script, '--puerto', puerto, '--modo', modo_cli, '--si'] + \
-          [f'--meta={w[0]:.1f},{w[1]:.1f}' for w in waypoints]
-    with open(LOG_ROBOT, 'w', encoding='utf-8') as f:
-        f.write('$ ' + ' '.join(cmd[2:]) + '\n')
-    log = open(LOG_ROBOT, 'a', encoding='utf-8')
-    flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
-    st.session_state.robot_proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=env,
-                                                   creationflags=flags)
-    log.close()
+    if _robot_activo():
+        raise RuntimeError('Ya hay una trayectoria en ejecución.')
+    script = os.path.join(DIR_HW, 'reproducir_simulacion_sg90.py')
+    env = dict(os.environ, PYTHONPATH=os.path.dirname(DIR_HW), PYTHONIOENCODING='utf-8')
+    anterior = st.session_state.pop('robot_directorio', None)
+    if anterior is not None:
+        anterior.cleanup()
+    directorio = tempfile.TemporaryDirectory(prefix='sg90_')
+    try:
+        archivo = os.path.join(directorio.name, 'trayectoria.json')
+        with open(archivo, 'wb') as f:
+            f.write(trayectoria_json)
+        cmd = [sys.executable, '-u', script, '--trayectoria', archivo, '--puerto', puerto, '--si']
+        ruta_log = os.path.join(directorio.name, 'envio.log')
+        with open(ruta_log, 'w', encoding='utf-8') as log:
+            log.write('$ ' + ' '.join(cmd[2:]) + '\n')
+            log.flush()
+            flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+            st.session_state.robot_proc = subprocess.Popen(
+                cmd, stdout=log, stderr=subprocess.STDOUT, env=env, creationflags=flags,
+            )
+    except OSError:
+        directorio.cleanup()
+        raise
+    st.session_state.robot_directorio = directorio
+    st.session_state.robot_log = ruta_log
+    st.session_state.robot_salida = ''
+    st.session_state.robot_cancelado = False
 
 
-def _estado_robot():
+def _estado_robot(refrescar=False):
     proc = st.session_state.get('robot_proc')
     if proc is None:
         return
@@ -2858,24 +3009,33 @@ def _estado_robot():
         st.info('🟢 Enviando trayectoria al robot…')
     elif proc.returncode == 0:
         st.success('Envío terminado.')
-    elif proc.returncode in (1, 15, -15) or proc.returncode > 1000:
+    elif st.session_state.get('robot_cancelado') or proc.returncode in (15, -15, 130):
         st.warning(f'Envío detenido (código {proc.returncode}). El brazo se queda en la última posición recibida.')
     else:
         st.error(f'El envío falló (código {proc.returncode}). Revisa el registro.')
-    if os.path.exists(LOG_ROBOT):
-        with open(LOG_ROBOT, encoding='utf-8', errors='replace') as f:
-            st.code(''.join(f.readlines()[-12:]) or '(sin salida aún)', language='text')
+    ruta_log = st.session_state.get('robot_log')
+    if ruta_log and os.path.exists(ruta_log):
+        with open(ruta_log, encoding='utf-8', errors='replace') as f:
+            st.session_state.robot_salida = ''.join(f.readlines()[-12:])
+    st.code(st.session_state.get('robot_salida') or '(sin salida aún)', language='text')
+    if proc.poll() is not None:
+        directorio = st.session_state.pop('robot_directorio', None)
+        if directorio is not None:
+            directorio.cleanup()
+        if refrescar:
+            st.rerun(scope='app')
 
 
 with tab_robot:
     with st.container(key='robot_fisico_ribbon', width=1100):
-        conexion, estado, acciones = st.columns([2, 2, 1.4])
+        conexion, estado, acciones = st.columns([1.3, 1.8, 2])
         with conexion:
             slot_puerto = st.empty()
             st.caption('Conexión')
         with acciones:
             with st.container(key='acciones_envio'):
-                b_env, b_stop, b_guia = st.columns(3)
+                b_env = st.container()
+                b_stop, b_guia = st.columns(2)
                 with b_guia:
                     if st.button('ⓘ', key='guia_envio', help='Abrir los pasos de conexión, envío y detención del robot local.'):
                         _mostrar_guia_robot('envio')
@@ -2883,20 +3043,20 @@ with tab_robot:
             st.caption('Acciones')
         with estado:
             st.caption(f'CONTROL · {modo}')
-            st.caption(f'{len(st.session_state.waypoints)} puntos · Inicio (90°, 90°) · Límites 5°–170°')
+            st.caption(f'{len(waypoints_operacionales())} puntos · Límites del modelo 5°–170°')
+            if trayectoria_robot_json:
+                st.caption(f'{len(cuadros)} muestras · {len(cuadros) * dt / multiplicador_velocidad:.2f} s · '
+                           f'{multiplicador_velocidad:g}x · mismos tiempos que la animación')
             st.caption('Estado')
-        st.caption('USB local: ejecuta esta página en el PC conectado al Arduino; no funciona desde la web publicada.')
-        secuencia_compatible_robot = all(
-            segmento['tipo'] == ESTADO_LIBRE and 'conexion_hmi' not in segmento
-            for segmento in st.session_state.secuencia_operacional
-        )
-        if not secuencia_compatible_robot:
-            st.warning(
-                'La secuencia contiene una pausa, una pasada A→X o un recorrido virtual HMI. '
-                'No se envía al hardware para evitar omitir esos estados o cambiar la trayectoria; '
-                'crea una secuencia solo de posicionamientos del editor principal para usar el robot físico.'
-            )
-        elif not _hay_pyserial():
+        st.caption('1. Añade puntos en Simulación o Control HMI → 2. Simula → 3. Ejecuta en robot por USB, '
+                   'o exporta el ZIP. Sin puntos, usa el mando manual HMI.')
+        if error_trayectoria_robot:
+            st.info(error_trayectoria_robot)
+            if st.button('Simular trayectoria', key='calcular_usb',
+                         disabled=not st.session_state.secuencia_operacional):
+                st.session_state.calcular_para_robot = True
+                st.rerun()
+        if not _hay_pyserial():
             st.error('Falta `pyserial` en el Python que ejecuta esta página. Instálalo con:\n\n'
                      f'`"{sys.executable}" -m pip install pyserial`')
         else:
@@ -2908,35 +3068,41 @@ with tab_robot:
             elif not puertos:
                 st.caption('No se detectó ningún puerto. Conecta el Arduino, o usa loop:// para probar sin placa.')
 
-            wps_robot = list(st.session_state.waypoints)
-            modo_cli = MODO_A_CLI.get(modo)
-            if modo_cli is None:
-                st.warning('Para el robot elige "Cinemático" (recomendado) o "PID + Feedforward" en el modo de control.')
-            elif modo == 'PID + Feedforward':
-                st.warning('PID + Feedforward es más brusco que el cinemático (atraso simulado de ~31°). '
-                           'Para la primera prueba usa Cinemático.')
-            confirmado = st.checkbox('Área despejada y fuente externa de 5 V con GND común conectada: '
-                                     'el brazo saltará a (90°, 90°) y se moverá.')
+            inicio_robot = json.loads(trayectoria_robot_json)['inicio_deg'] if trayectoria_robot_json else None
+            estado.caption(f'Inicio sin rampa: {inicio_robot} grados' if inicio_robot else 'Calcula primero la trayectoria.')
+            firma_confirmacion = hashlib.sha256(
+                (trayectoria_robot_json or firma_robot.encode('utf-8'))
+            ).hexdigest()
+            confirmado = estado.checkbox(
+                'Calibración y área verificadas',
+                key=f'confirmar_robot_{firma_confirmacion}',
+                help='Calibración PWM y límites físicos verificados, área despejada, fuente externa de 5 V '
+                     'con GND común y corte de alimentación accesible. La primera orden aplica la pose inicial sin rampa.',
+            )
             activo = _robot_activo()
-            enviar = b_env.button('📤', use_container_width=False, type='primary',
-                                  help='Enviar los posicionamientos al robot físico. Requiere confirmar alimentación y área despejada.',
+            enviar = b_env.button('Ejecutar en robot · USB', key='ejecutar_robot_usb',
+                                  use_container_width=True, type='primary',
+                                  help='Reproducir los ángulos calculados y sus tiempos, sin recalcular la trayectoria.',
                                   disabled=(
-                                      activo or not confirmado or modo_cli is None or not wps_robot
-                                      or not secuencia_compatible_robot
+                                      activo or not confirmado or trayectoria_robot_json is None
                                       or st.session_state.get('hmi_enlace_vivo') is not None
                                   ))
-            b_env.caption('Enviar')
             detener = b_stop.button('■', use_container_width=False, disabled=not activo,
                                     help='Detener el proceso de envío serial. El robot mantiene la última orden; no corta su alimentación.')
             b_stop.caption('Detener')
+            st.caption('Detener cancela el envío, no corta la alimentación. Pausa visual no detiene USB.')
             if enviar:
-                _enviar_robot(puerto, modo_cli, wps_robot)
-                st.rerun()
+                try:
+                    _enviar_robot(puerto, trayectoria_robot_json)
+                except (OSError, RuntimeError) as exc:
+                    st.error(f'No se pudo iniciar el envío: {exc}')
+                else:
+                    st.rerun()
             if detener:
                 _detener_robot()
                 st.rerun()
             if activo:
-                st.fragment(run_every=1)(_estado_robot)()
+                st.fragment(run_every=1)(_estado_robot)(True)
             else:
                 _estado_robot()
 
@@ -3012,7 +3178,7 @@ def _hmi_panel_vivo():
         enlace = None
     activo = enlace is not None
     with st.expander('Movimiento en vivo · USB local', expanded=activo):
-        st.caption('Solo 2 servos: hombro D9 y codo D10, firmware brazo_sg90.ino. '
+        st.caption('Solo 2 servos: hombro CH0 y codo CH1 del PCA9685, firmware brazo_sg90.ino. '
                    'Cruceta e Ir envian metas; no reproducen curvas ni secuencias.')
         puertos = _puertos_serie() if _hmi_es_local() else []
         st.selectbox('Puerto HMI', [OPCION_LOOP] + puertos, key='hmi_puerto_vivo', disabled=activo)
@@ -3169,10 +3335,37 @@ def _hmi_figura():
 def _mostrar_teach_pendant():
     st.markdown("""
     <style>
-    div[role="dialog"]:has(.st-key-teach_pendant_sg90) {width:min(1200px,96vw);max-width:1200px;background:#0f172a;color:#f8fafc;}
+    div[role="dialog"]:has(.st-key-teach_pendant_sg90) {
+      width:min(1200px,96vw);max-width:1200px;max-height:calc(100vh - 2rem);
+      max-height:calc(100dvh - 2rem);overflow-y:auto;overscroll-behavior:contain;
+      scrollbar-gutter:stable;background:#0f172a;color:#f8fafc;
+    }
+    .st-key-teach_pendant_sg90 {padding-bottom:1rem;}
     .st-key-teach_pendant_sg90 [data-testid="stVerticalBlock"] {gap:.4rem;}
-    .st-key-teach_pendant_sg90 button {border-radius:5px;min-height:2.5rem;}
-    .st-key-teach_pendant_sg90 .st-key-hmi_cruceta button {background:#223048;border-color:#475569;font-weight:700;}
+    .st-key-teach_pendant_sg90 [data-testid="stWidgetLabel"] p,
+    .st-key-teach_pendant_sg90 [data-testid="stMarkdownContainer"] p,
+    .st-key-teach_pendant_sg90 label,
+    .st-key-teach_pendant_sg90 label p {color:#e2e8f0 !important;}
+    .st-key-teach_pendant_sg90 button {border-radius:5px;min-height:2.5rem;color:#f8fafc !important;}
+    .st-key-teach_pendant_sg90 button p {color:inherit !important;}
+    .st-key-teach_pendant_sg90 .st-key-hmi_cruceta button {background:#223048;border-color:#64748b;font-weight:700;}
+    .st-key-teach_pendant_sg90 button[data-testid="stBaseButton-secondary"] {
+      background:#1e293b !important;border:1px solid #475569 !important;color:#f3f4f6 !important;
+    }
+    .st-key-teach_pendant_sg90 button[data-testid="stBaseButton-secondary"] p {color:#f3f4f6 !important;}
+    .st-key-teach_pendant_sg90 [data-testid="stNumberInputContainer"] {
+      background:#1e293b !important;border-color:#475569 !important;color:#f3f4f6 !important;
+    }
+    .st-key-teach_pendant_sg90 [data-testid="stNumberInput"] input {
+      background:transparent !important;color:#f3f4f6 !important;-webkit-text-fill-color:#f3f4f6 !important;
+    }
+    .st-key-teach_pendant_sg90 [data-testid="stNumberInput"] button {
+      background:#1e293b !important;color:#f3f4f6 !important;border-color:#475569 !important;
+    }
+    .st-key-teach_pendant_sg90 button:disabled {
+      opacity:.8 !important;background:#1e293b !important;border-color:#475569 !important;color:#94a3b8 !important;
+    }
+    .st-key-teach_pendant_sg90 button:disabled p {color:#94a3b8 !important;}
     </style>
     """, unsafe_allow_html=True)
     with st.container(key='teach_pendant_sg90'):

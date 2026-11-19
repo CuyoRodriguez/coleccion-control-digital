@@ -58,6 +58,19 @@ class TeachPendantSG90Tests(unittest.TestCase):
     def pulsar(self, clave):
         self.actualizar(self.app.button(clave).click())
 
+    def test_dialogo_hmi_permite_desplazamiento_vertical(self):
+        estilos = [elemento.value for elemento in self.app.markdown
+                   if 'st-key-teach_pendant_sg90' in elemento.value]
+        self.assertTrue(any('max-height:calc(100dvh - 2rem)' in estilo
+                            and 'overflow-y:auto' in estilo for estilo in estilos))
+
+    def test_controles_hmi_tienen_estilo_oscuro_legible(self):
+        estilos = [elemento.value for elemento in self.app.markdown
+                   if 'st-key-teach_pendant_sg90' in elemento.value]
+        self.assertTrue(any('stNumberInputContainer' in estilo
+                            and 'stBaseButton-secondary' in estilo
+                            and '-webkit-text-fill-color:#f3f4f6' in estilo for estilo in estilos))
+
     def test_jog_precision_limites_y_ejecucion_de_recta(self):
         for factor, desplazamiento in ((0.1, 10), (0.01, 1), (0.001, 0.1)):
             self.actualizar(self.app.radio('hmi_paso').set_value(factor))
@@ -78,7 +91,8 @@ class TeachPendantSG90Tests(unittest.TestCase):
         self.assertGreater(len(cuadros), 2)
         self.assertEqual(self.app.session_state['indice_secuencia'], 1)
         self.assertTrue(all(not c['soldadura_activa'] for c in cuadros))
-        self.assertTrue(any('recorrido virtual HMI' in aviso.value for aviso in self.app.warning))
+        self.assertTrue(any('mismos tiempos' in texto.value for texto in self.app.caption))
+        self.assertIn('robot_firma_calculada', self.app.session_state)
         q = np.asarray([c['q'] for c in cuadros[:60]])
         x = 100 * (np.cos(q[:, 0]) + np.cos(q.sum(axis=1)))
         y = 100 * (np.sin(q[:, 0]) + np.sin(q.sum(axis=1)))

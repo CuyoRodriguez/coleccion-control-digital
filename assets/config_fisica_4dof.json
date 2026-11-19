@@ -1,0 +1,8 @@
+{
+  "longitudes_m": [0.043, 0.080, 0.080, 0.055],
+  "masas_kg": [0.030, 0.025, 0.025, 0.020],
+  "centros_masa_m": null,
+  "radios_equivalentes_m": [0.005, 0.005, 0.005, 0.005],
+  "gravedad_m_s2": 9.81,
+  "friccion_viscosa": [0.001, 0.002, 0.003, 0.004]
+}
