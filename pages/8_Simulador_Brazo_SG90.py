@@ -6,10 +6,16 @@ Los modos Cinemático y PID + Feedforward están activos; PID puro, RNA y RL se 
 (la RNA y el RL se entrenaron con el modelo de 9 m y todavía no existen para este robot). Sin obstáculos.
 Las unidades de posición están en mm; la dinámica se calcula en SI (m, kg, N·m).
 """
+import importlib.util
 import io
+import json
+import logging
 import os
+import subprocess
 import sys
+import tempfile
 import zipfile
+from urllib.parse import urlparse
 import joblib
 import matplotlib.pyplot as plt
 import numpy as np
@@ -17,8 +23,11 @@ import plotly.graph_objects as go
 import streamlit as st
 import streamlit.components.v1 as components
 from matplotlib.figure import Figure
-from scipy.signal import cont2discrete
+from scipy.signal import cont2discrete, place_poles
 from matplotlib.patches import Circle, Rectangle
+from assets.reporte_sg90 import informe_html, interfaz_grabacion
+from assets.trayectoria_hmi_sg90 import planificar_recorrido
+from assets.control_vivo_sg90 import ControlVivoSG90
 
 # =====================================================================
 # PARÁMETROS FÍSICOS Y CONSTANTES (idénticos al simulador de escritorio)
@@ -28,6 +37,7 @@ LM1, LM2 = L1 / 1000, L2 / 1000   # m (dinámica)
 m1, m2 = 0.05, 0.05          # kg por eslabón (eslabón + servo)
 g = 9.81
 dt = 0.02
+PASOS_POR_FRAME = 2
 TORQUE_MAX = 0.15            # N·m, valor pico del SG90
 DQ_MAX = 10.0                # rad/s
 SUBPASOS = 10                # la integración con un solo paso de 20 ms diverge con estas inercias
@@ -39,6 +49,10 @@ B_VISC = 0.003               # Fricción viscosa articular (N·m·s/rad), valor 
 MODOS_DINAMICOS = ('PID', 'PID + Feedforward')  # Únicos modos con dinámica: aplica el análisis en el plano z
 MODOS = ('Cinemático', 'PID', 'PID + Feedforward', 'Cinemático con RNA', 'Control por RL (PPO)')
 MODO_RL = MODOS[4]
+ESTADO_REPOSO = 'Reposo'
+ESTADO_LIBRE = 'Posicionamiento libre'
+ESTADO_SOLDADURA = 'Soldadura'
+TIPOS_SEGMENTO = (ESTADO_LIBRE, ESTADO_REPOSO, ESTADO_SOLDADURA)
 MODOS_NO_DISPONIBLES = {
     'Cinemático con RNA': 'La RNA se entrenó con el brazo de 9 m (L1=5, L2=4); aún no existe una para el SG90.',
     MODO_RL: 'La política RL (v13_c) se entrenó con el brazo de 9 m y obstáculos; aún no existe una para el SG90.',
@@ -83,11 +97,249 @@ COLOR_ACENTO = '#38bdf8'
 COLOR_IDEAL = '#f87171'
 COLOR_RNA = '#4ade80'
 
-st.set_page_config(layout='wide', page_title='Laboratorio de Control Digital - Brazo 2-DOF SG90')
+st.set_page_config(layout="wide", initial_sidebar_state='collapsed',
+                   page_title='Laboratorio de Control Digital - Brazo 2-DOF SG90')
+
+st.markdown('''
+    <style>
+        .block-container {
+            padding-top: 1rem !important;
+            padding-left: 1rem !important;
+            padding-right: 1rem !important;
+            max-width: 100% !important;
+        }
+        header {visibility: hidden;}
+        .block-container [data-testid="stElementContainer"]:has(
+            [data-testid="stMarkdownContainer"] > style:only-child
+        ) {
+            display: none;
+        }
+        .st-key-ribbon_sg90 {
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            background: #131c2e;
+            padding: 0.25rem 0.5rem;
+        }
+        [data-testid="stLayoutWrapper"]:has(> .st-key-ribbon_sg90) {
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+        .st-key-ribbon_sg90 [role="tabpanel"] {
+            max-height: min(12rem, 30vh);
+            overflow-y: auto;
+            overflow-x: hidden;
+            scrollbar-gutter: stable;
+            padding: 0.25rem 0;
+        }
+        .st-key-ribbon_sg90 [data-testid="stVerticalBlock"] {
+            gap: 0.4rem;
+        }
+        .st-key-ribbon_sg90 [data-testid="stMarkdownContainer"] p {
+            margin-bottom: 0.25rem;
+        }
+        .st-key-ribbon_sg90 [data-testid="stBaseButton-secondary"],
+        .st-key-ribbon_sg90 [data-testid="stDownloadButton"] button {
+            min-height: 2rem;
+        }
+        .st-key-ribbon_sg90 [data-testid="stButton"] button,
+        .st-key-ribbon_sg90 [data-testid="stDownloadButton"] button,
+        .st-key-ribbon_sg90 [data-testid="stPageLink-NavLink"] {
+            width: 2.75rem;
+            min-width: 2.75rem;
+            min-height: 2.5rem;
+            padding: 0.25rem !important;
+            justify-content: center;
+        }
+        .st-key-ribbon_sg90 [data-testid="stElementContainer"]:has(> [data-testid="stButton"]),
+        .st-key-ribbon_sg90 [data-testid="stElementContainer"]:has(> [data-testid="stDownloadButton"]) {
+            align-self: center;
+        }
+        .st-key-ribbon_sg90 .st-key-abrir_hmi_sg90 [data-testid="stButton"] button {
+            width: auto;
+            min-width: 6rem;
+            padding: 0.25rem 0.5rem !important;
+        }
+        .st-key-ribbon_sg90 [data-testid="stButton"] button[data-testid="stBaseButton-secondary"],
+        .st-key-ribbon_sg90 [data-testid="stDownloadButton"] button[data-testid="stBaseButton-secondary"] {
+            background: transparent !important;
+            border: 1px solid transparent !important;
+            border-radius: 4px !important;
+            box-shadow: none;
+        }
+        .st-key-ribbon_sg90 [data-testid="stButton"] button[data-testid="stBaseButton-secondary"]:hover,
+        .st-key-ribbon_sg90 [data-testid="stDownloadButton"] button[data-testid="stBaseButton-secondary"]:hover {
+            background: #223048 !important;
+            border-color: #334155 !important;
+        }
+        :is(.st-key-grupos_simulacion, .st-key-grupos_analisis, .st-key-selector_robot_ribbon,
+            .st-key-codigo_robot_ribbon, .st-key-robot_fisico_ribbon)
+            > [data-testid="stLayoutWrapper"] > [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
+            border-right: 1px solid #334155;
+            padding: 0 0.5rem;
+        }
+        :is(.st-key-grupos_simulacion, .st-key-grupos_analisis, .st-key-selector_robot_ribbon,
+            .st-key-codigo_robot_ribbon, .st-key-robot_fisico_ribbon)
+            > [data-testid="stLayoutWrapper"] > [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]:last-child {
+            border-right: 0;
+        }
+        :is(.st-key-grupos_simulacion, .st-key-grupos_analisis, .st-key-selector_robot_ribbon,
+            .st-key-codigo_robot_ribbon, .st-key-robot_fisico_ribbon)
+            > [data-testid="stLayoutWrapper"] > [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]
+            > [data-testid="stVerticalBlock"] {
+            height: 100%;
+        }
+        :is(.st-key-grupos_simulacion, .st-key-grupos_analisis, .st-key-selector_robot_ribbon,
+            .st-key-codigo_robot_ribbon, .st-key-robot_fisico_ribbon)
+            > [data-testid="stLayoutWrapper"] > [data-testid="stHorizontalBlock"] > [data-testid="stColumn"]
+            > [data-testid="stVerticalBlock"] > [data-testid="stElementContainer"]:last-child:has([data-testid="stCaptionContainer"]) {
+            margin-top: auto;
+            padding-top: 0.35rem;
+            text-align: center;
+        }
+        :is(.st-key-acciones_reproduccion, .st-key-acciones_reporte,
+            .st-key-codigo_robot_ribbon, .st-key-acciones_envio, .st-key-asistencia_simulador_ribbon)
+            [data-testid="stCaptionContainer"] {
+            text-align: center;
+        }
+        @media (max-width: 640px) {
+            :is(.st-key-grupos_simulacion, .st-key-grupos_analisis, .st-key-selector_robot_ribbon,
+                .st-key-codigo_robot_ribbon, .st-key-robot_fisico_ribbon)
+                > [data-testid="stLayoutWrapper"] > [data-testid="stHorizontalBlock"] > [data-testid="stColumn"] {
+                border-right: 0;
+                border-bottom: 1px solid #334155;
+                padding-bottom: 0.5rem;
+            }
+        }
+        .st-key-ribbon_handle {
+            position: relative;
+        }
+        .st-key-ribbon_handle::before {
+            content: "";
+            position: absolute;
+            top: 50%;
+            left: 0;
+            right: 0;
+            border-top: 1px solid #334155;
+        }
+        .st-key-ribbon_handle [data-testid="stButton"] {
+            display: flex;
+            justify-content: center;
+        }
+        .st-key-ribbon_sg90 .st-key-ribbon_handle button[data-testid="stBaseButton-secondary"] {
+            min-height: 1.5rem;
+            height: 1.5rem;
+            padding: 0 !important;
+            border: 0 !important;
+            border-radius: 4px !important;
+            background: #131c2e !important;
+            color: #94a3b8 !important;
+            box-shadow: none;
+            opacity: 0;
+            transition: opacity 120ms ease, color 120ms ease;
+        }
+        .st-key-ribbon_handle button [data-testid="stMarkdownContainer"] {
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            overflow: hidden;
+            clip-path: inset(50%);
+            white-space: nowrap;
+        }
+        .st-key-ribbon_sg90 .st-key-ribbon_handle:hover button[data-testid="stBaseButton-secondary"],
+        .st-key-ribbon_sg90 .st-key-ribbon_handle:focus-within button[data-testid="stBaseButton-secondary"] {
+            opacity: 1;
+        }
+        .st-key-ribbon_sg90 .st-key-ribbon_handle button[data-testid="stBaseButton-secondary"]:hover,
+        .st-key-ribbon_sg90 .st-key-ribbon_handle button[data-testid="stBaseButton-secondary"]:focus-visible {
+            color: #38bdf8 !important;
+        }
+        @media (hover: none) {
+            .st-key-ribbon_sg90 .st-key-ribbon_handle button[data-testid="stBaseButton-secondary"] {
+                opacity: 1;
+            }
+        }
+        .st-key-ribbon_sg90 [data-testid="stCaptionContainer"] {
+            margin-bottom: 0;
+        }
+        .st-key-ribbon_sg90 [data-testid="stCaptionContainer"] p {
+            font-size: 0.75rem;
+            line-height: 1.2;
+            margin: 0;
+        }
+        .st-key-ribbon_sg90 [data-testid="stRadioOption"] {
+            padding: 4px 8px;
+            border-radius: 6px;
+        }
+        :is(.st-key-navegacion_ribbon, .st-key-selector_robot_ribbon) [data-testid="stPageLink"] {
+            width: 2.75rem;
+        }
+        :is(.st-key-navegacion_ribbon, .st-key-selector_robot_ribbon) [data-testid="stElementContainer"]:has([data-testid="stPageLink"]) {
+            align-self: center;
+        }
+        :is(.st-key-navegacion_ribbon, .st-key-selector_robot_ribbon) [data-testid="stCaptionContainer"] {
+            text-align: center;
+        }
+        :is(.st-key-navegacion_ribbon, .st-key-selector_robot_ribbon) [data-testid="stPageLink-NavLink"] p {
+            font-size: 1.15rem;
+        }
+        .st-key-codigo_robot_ribbon [data-testid="stMarkdownContainer"] p,
+        .st-key-robot_fisico_ribbon [data-testid="stMarkdownContainer"] p {
+            font-size: 0.78rem;
+            line-height: 1.35;
+        }
+        .st-key-codigo_robot_ribbon [data-testid="stAlert"],
+        .st-key-robot_fisico_ribbon [data-testid="stAlert"] {
+            padding: 0;
+            border-left: 3px solid #fbbf24;
+            border-radius: 6px;
+        }
+        :is(.st-key-codigo_robot_ribbon, .st-key-robot_fisico_ribbon)
+            [data-testid="stAlertContainer"] {
+            padding: 0.4rem 0.6rem;
+        }
+        :is(.st-key-codigo_robot_ribbon, .st-key-robot_fisico_ribbon)
+            [data-testid="stAlert"] [data-testid="stMarkdownContainer"],
+        :is(.st-key-codigo_robot_ribbon, .st-key-robot_fisico_ribbon)
+            [data-testid="stAlert"] p {
+            margin: 0;
+        }
+        [data-testid="stDialog"] {
+            background-color: rgba(0, 0, 0, 0.65) !important;
+        }
+        [data-testid="stDialog"] [role="dialog"] {
+            background: #1b263b;
+            color: #f8fafc;
+            border: 1px solid #334155;
+        }
+        [data-testid="stDialog"] [role="dialog"] h2 {
+            color: #38bdf8;
+        }
+    </style>
+''', unsafe_allow_html=True)
+
+if st.session_state.get('ribbon_oculto', False):
+    st.markdown('''
+        <style>
+            .st-key-ribbon_sg90 [data-testid="stTabs"] {
+                display: none;
+            }
+            .st-key-ribbon_sg90 .st-key-ribbon_handle button[data-testid="stBaseButton-secondary"] {
+                opacity: 1;
+            }
+        </style>
+    ''', unsafe_allow_html=True)
 
 st.markdown("""
 <style>
 [data-testid="stSidebarNav"] {
+    display: none !important;
+}
+
+[data-testid="stSidebar"],
+[data-testid="stSidebarCollapsedControl"],
+[data-testid="stExpandSidebarButton"] {
     display: none !important;
 }
 
@@ -340,21 +592,70 @@ button[data-testid="stSidebarCollapseButton"] svg {
 [data-testid="stCaptionContainer"] p {
     color: #b6c2d4 !important;
 }
+
+[data-testid="stSelectbox"] [data-baseweb="select"],
+[data-testid="stSelectbox"] [data-baseweb="select"] *:not(svg):not(path) {
+    background: #1e293b !important;
+    background-color: #1e293b !important;
+    color: #f3f4f6 !important;
+    -webkit-text-fill-color: #f3f4f6 !important;
+}
+
+[data-testid="stSelectbox"] [data-baseweb="select"] > div {
+    border-color: #374151 !important;
+}
+
+[data-testid="stCheckbox"] label > span:first-of-type,
+[data-testid="stCheckbox"] [data-baseweb="checkbox"] > span:first-child {
+    background: #1e293b !important;
+    background-color: #1e293b !important;
+    border: 1px solid #64748b !important;
+}
+
+[data-testid="stCheckbox"] label:has(input:checked) > span:first-of-type {
+    background: #38bdf8 !important;
+    border-color: #38bdf8 !important;
+}
+
+[data-testid="stCheckbox"] p {
+    color: #f8fafc !important;
+}
+
+[data-testid="stSelectbox"] [data-baseweb="select"] div,
+[data-testid="stSelectbox"] [data-baseweb="select"] svg {
+    color: #f3f4f6 !important;
+    fill: #f3f4f6 !important;
+}
+
+[data-baseweb="popover"] ul,
+[data-baseweb="popover"] li {
+    background: #1e293b !important;
+    color: #f3f4f6 !important;
+}
+
+[data-baseweb="popover"] li:hover {
+    background: #273449 !important;
+}
+
+[data-testid="stMain"] button[data-testid="stBaseButton-primary"] {
+    background: #38bdf8 !important;
+    border: 1px solid #38bdf8 !important;
+    color: #0f172a !important;
+    font-weight: 700 !important;
+}
+
+[data-testid="stMain"] button[data-testid="stBaseButton-primary"] p {
+    color: #0f172a !important;
+}
+
+[data-testid="stMain"] button:disabled {
+    opacity: 0.35 !important;
+    cursor: not-allowed !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
-with st.sidebar:
-    st.page_link("app.py", label="🏠 Página Central", use_container_width=True)
-    st.page_link(
-        "pages/7_Simulador_Brazo_Robotico.py",
-        label="🦾 Simulador Brazo Robótico",
-        use_container_width=True,
-    )
-    st.page_link(
-        "pages/8_Simulador_Brazo_SG90.py",
-        label="🤖 Simulador Brazo SG90 (v0.5)",
-        use_container_width=True,
-    )
+estado_operacional = 'Secuencia de estados'
 
 
 # =====================================================================
@@ -502,6 +803,42 @@ def construir_trayectoria(q_inicio, waypoints_q):
     return trayectoria
 
 
+def construir_plan_soldadura(q_inicio, punto_a, punto_x):
+    """Genera una aproximación articular y una pasada A→X recta en cartesiano, validando cada muestra por IK."""
+    punto_a = np.asarray(punto_a, dtype=float)
+    punto_x = np.asarray(punto_x, dtype=float)
+    q_a = ik(*punto_a)
+    q_x = ik(*punto_x)
+    if q_a[0] is None or q_x[0] is None:
+        raise ValueError('A y X deben ser alcanzables dentro del espacio de trabajo y los límites articulares.')
+
+    q_inicio = np.asarray(q_inicio, dtype=float)
+    aproximacion = (
+        np.linspace(q_inicio, np.asarray(q_a), PASOS_POR_TRAMO + 1)[1:]
+        if not np.allclose(q_inicio, q_a, atol=1e-9)
+        else np.empty((0, 2))
+    )
+    puntos_xy = np.linspace(punto_a, punto_x, PASOS_POR_TRAMO + 1)[1:]
+    trayectoria_soldadura = []
+    for indice, punto in enumerate(puntos_xy, start=1):
+        q1, q2 = ik(*punto)
+        if q1 is None:
+            raise ValueError(
+                f'El tramo cartesiano A→X sale del espacio alcanzable en la muestra {indice}/{PASOS_POR_TRAMO}.'
+            )
+        trayectoria_soldadura.append((q1, q2))
+
+    trayectoria_q = np.vstack([aproximacion, trayectoria_soldadura])
+    indice_inicio = len(aproximacion)
+    indice_fin = indice_inicio + len(trayectoria_soldadura)
+    return (
+        tuple(tuple(float(valor) for valor in q) for q in trayectoria_q),
+        tuple(tuple(float(valor) for valor in xy) for xy in puntos_xy),
+        indice_inicio,
+        indice_fin,
+    )
+
+
 def simular_rl(estado, waypoints, modelo, obstaculos):
     """Lazo cerrado con la política v13: cada waypoint es la meta; la red recibe los obstáculos (hasta 8) y los
     sensores virtuales en su observación de 50 valores. Los obstáculos no alteran la dinámica.
@@ -526,6 +863,7 @@ def simular_rl(estado, waypoints, modelo, obstaculos):
             accion = modelo.accion(modelo.observacion(q, dq, meta, obstaculos))
             q, dq, tau, M, G = modelo.paso(q, dq, accion)
             cuadros.append({'q': q.copy(), 'q_d': q_d.copy(), 'error': q_d - q,
+                            'dq': dq.copy(),
                             'u_pid': np.zeros(2), 'u_ff': np.zeros(2), 'tau': tau,
                             'M': M, 'G': G, 'rna': None})
             xs, ys = fk(q[0], q[1])
@@ -558,7 +896,10 @@ def simular_rl(estado, waypoints, modelo, obstaculos):
     return cuadros
 
 
-def simular(estado, waypoints, modo, Kp, Kd, Ki, mlp, modelo_rl, obstaculos=()):
+def simular(
+    estado, waypoints, modo, Kp, Kd, Ki, mlp, modelo_rl, obstaculos=(),
+    plan_soldadura=None, estado_operacional=ESTADO_LIBRE, trayectoria_posicionamiento=None,
+):
     """Integra todo el lazo de control y devuelve la lista de cuadros (uno por paso)."""
     if modo == MODO_RL:
         return simular_rl(estado, waypoints, modelo_rl, obstaculos)
@@ -566,11 +907,22 @@ def simular(estado, waypoints, modo, Kp, Kd, Ki, mlp, modelo_rl, obstaculos=()):
     q, dq = estado['q'].copy(), estado['dq'].copy()
     q_d, err_int = estado['q_d'].copy(), estado['err_int'].copy()
 
-    trayectoria = construir_trayectoria(q_d, [(w[2], w[3]) for w in waypoints])
+    if plan_soldadura is None:
+        trayectoria = (
+            list(trayectoria_posicionamiento) if trayectoria_posicionamiento is not None
+            else construir_trayectoria(q_d, [(w[2], w[3]) for w in waypoints])
+        )
+        indice_inicio_soldadura = indice_fin_soldadura = None
+        puntos_xy_soldadura = ()
+    else:
+        setpoints_q, puntos_xy_soldadura, indice_inicio_soldadura, indice_fin_soldadura = plan_soldadura
+        trayectoria = [np.asarray(punto, dtype=float) for punto in setpoints_q]
+        if not trayectoria:
+            raise ValueError('El plan de soldadura no contiene setpoints.')
     trayectoria += [trayectoria[-1]] * PASOS_ASENTAMIENTO
     cuadros = []
 
-    for q_d in trayectoria:
+    for indice, q_d in enumerate(trayectoria):
         error = q_d - q
         err_int = err_int + error * dt
         if Ki > 0:
@@ -598,21 +950,49 @@ def simular(estado, waypoints, modo, Kp, Kd, Ki, mlp, modelo_rl, obstaculos=()):
         else:
             raise ValueError(f'Modo no disponible para el SG90: {modo}')
 
-        cuadros.append({'q': q.copy(), 'q_d': q_d.copy(), 'error': error, 'u_pid': u_pid,
-                        'u_ff': u_ff, 'tau': tau, 'M': M, 'G': G, 'rna': q_rna})
+        cuadro = {
+            'q': q.copy(), 'dq': dq.copy(), 'q_d': q_d.copy(), 'error': error, 'u_pid': u_pid,
+            'u_ff': u_ff, 'tau': tau, 'M': M, 'G': G, 'rna': q_rna,
+            'estado_operacional': estado_operacional,
+        }
+        if plan_soldadura is None:
+            cuadro['fase_operacional'] = 'Posicionamiento'
+            cuadro['soldadura_activa'] = False
+        elif indice < indice_inicio_soldadura:
+            cuadro['fase_operacional'] = 'Aproximación a A'
+            cuadro['soldadura_activa'] = False
+        elif indice < indice_fin_soldadura:
+            xy_d = np.asarray(puntos_xy_soldadura[indice - indice_inicio_soldadura])
+            xs, ys = fk(q[0], q[1])
+            cuadro.update(
+                fase_operacional='Pasada A→X',
+                soldadura_activa=True,
+                xy_d=xy_d,
+                error_cartesiano_mm=float(np.hypot(xs[2] - xy_d[0], ys[2] - xy_d[1])),
+            )
+        else:
+            cuadro['fase_operacional'] = 'Asentamiento en X'
+            cuadro['soldadura_activa'] = False
+        cuadros.append(cuadro)
 
     estado.update(q=q, dq=dq, q_d=q_d.copy(), err_int=err_int)
     return cuadros
 
 
 @st.cache_data(max_entries=20, show_spinner='Integrando dinámica...')
-def simular_cacheado(estado, waypoints, modo, Kp, Kd, Ki, _mlp, _modelo_rl, version_modelo, obstaculos=()):
+def simular_cacheado(
+    estado, waypoints, modo, Kp, Kd, Ki, _mlp, _modelo_rl, version_modelo,
+    obstaculos=(), plan_soldadura=None, estado_operacional=ESTADO_LIBRE,
+):
     """Versión memoizada de simular(): mismos parámetros => no se recalcula la integración.
     Devuelve (cuadros, estado_final). Los modelos van con '_' (no se hashean); version_modelo
     (mtime del archivo) invalida la caché si el modelo RL se reentrena. `obstaculos` (tupla inmutable) solo
     se pasa en modo RL, el único que los consume: así mover un obstáculo no invalida las demás simulaciones."""
     estado = {k: v.copy() for k, v in estado.items()}
-    cuadros = simular(estado, waypoints, modo, Kp, Kd, Ki, _mlp, _modelo_rl, obstaculos)
+    cuadros = simular(
+        estado, waypoints, modo, Kp, Kd, Ki, _mlp, _modelo_rl, obstaculos,
+        plan_soldadura, estado_operacional,
+    )
     return cuadros, estado
 
 
@@ -624,15 +1004,78 @@ def reiniciar_estado_fisico():
                                'q_d': Q_INICIAL.copy(), 'err_int': np.zeros(2)}
     st.session_state.cuadros = []
     st.session_state.cuadro_sel = 0
+    st.session_state.indice_secuencia = 0
+    st.session_state.pausa_activa = False
 
 
 def agregar_waypoint(x, y):
-    """Único punto de entrada a la lista global de waypoints (clic y modo manual)."""
+    """Añade un punto de posicionamiento a la lista y a la secuencia operativa."""
     t1, t2 = ik(x, y)
     if t1 is None:
         return False
-    st.session_state.waypoints.append((float(x), float(y), t1, t2))
+    waypoint = (float(x), float(y), t1, t2)
+    st.session_state.waypoints.append(waypoint)
+    st.session_state.secuencia_operacional.append({
+        'tipo': ESTADO_LIBRE,
+        'waypoint': waypoint,
+    })
     return True
+
+
+def waypoints_operacionales():
+    puntos = []
+    for segmento in st.session_state.get('secuencia_operacional', ()):
+        if segmento['tipo'] == ESTADO_LIBRE:
+            puntos.append(segmento['waypoint'])
+        elif segmento['tipo'] == ESTADO_SOLDADURA:
+            puntos.extend(segmento['waypoints'])
+    return tuple(puntos)
+
+
+def formatear_segmento(segmento):
+    if segmento['tipo'] == ESTADO_LIBRE:
+        x, y = segmento['waypoint'][:2]
+        return f'({x:.1f}, {y:.1f}) mm'
+    if segmento['tipo'] == ESTADO_SOLDADURA:
+        return f"A {segmento['punto_a']} → X {segmento['punto_x']}"
+    return 'Mantener pose hasta reanudar'
+
+
+def agregar_pausa():
+    st.session_state.secuencia_operacional.append({'tipo': ESTADO_REPOSO})
+
+
+def agregar_soldadura(punto_a, punto_x):
+    q_a, q_x = ik(*punto_a), ik(*punto_x)
+    if q_a[0] is None or q_x[0] is None:
+        return 'A y X deben ser alcanzables dentro del espacio de trabajo y los límites articulares.'
+    try:
+        construir_plan_soldadura(st.session_state.estado['q'], punto_a, punto_x)
+    except ValueError as exc:
+        return str(exc)
+    waypoints = (
+        (float(punto_a[0]), float(punto_a[1]), float(q_a[0]), float(q_a[1])),
+        (float(punto_x[0]), float(punto_x[1]), float(q_x[0]), float(q_x[1])),
+    )
+    st.session_state.secuencia_operacional.append({
+        'tipo': ESTADO_SOLDADURA,
+        'punto_a': tuple(float(v) for v in punto_a),
+        'punto_x': tuple(float(v) for v in punto_x),
+        'waypoints': waypoints,
+    })
+    return None
+
+
+def cuadro_reposo(estado):
+    q = estado['q'].copy()
+    estado.update(dq=np.zeros(2), q_d=q.copy(), err_int=np.zeros(2))
+    M, G = calcular_dinamica(q)
+    return {
+        'q': q, 'dq': np.zeros(2), 'q_d': q.copy(), 'error': np.zeros(2),
+        'u_pid': np.zeros(2), 'u_ff': np.zeros(2), 'tau': np.zeros(2),
+        'M': M, 'G': G, 'rna': None, 'estado_operacional': ESTADO_REPOSO,
+        'fase_operacional': 'Pausa; esperando reanudar',
+    }
 
 
 def agregar_obstaculo(x, y, r):
@@ -665,7 +1108,8 @@ def actualizar_waypoint_o_obstaculo(x, y):
     if st.session_state.get('clic_obstaculo', False):
         st.session_state.aviso_obs = agregar_obstaculo(x, y, st.session_state.get('radio_obs', 0.6))
     else:
-        agregar_waypoint(x, y)
+        if st.session_state.get('tipo_segmento') == ESTADO_LIBRE:
+            agregar_waypoint(x, y)
 
 
 if 'obstaculos' not in st.session_state:
@@ -675,13 +1119,148 @@ if 'waypoints' not in st.session_state:
     st.session_state.waypoints = []  # [(x, y, theta1, theta2)]
     st.session_state.clic_n = 0      # Cambia la clave del gráfico para limpiar su selección tras cada clic
     reiniciar_estado_fisico()
+if 'secuencia_operacional' not in st.session_state:
+    st.session_state.secuencia_operacional = [
+        {'tipo': ESTADO_LIBRE, 'waypoint': waypoint}
+        for waypoint in st.session_state.waypoints
+    ]
+if 'indice_secuencia' not in st.session_state:
+    st.session_state.indice_secuencia = 0
+if 'pausa_activa' not in st.session_state:
+    st.session_state.pausa_activa = False
 
 # =====================================================================
 # DISTRIBUCIÓN: los contenedores se crean en orden y se rellenan después de
-# procesar los controles (que están en la fila 2, debajo de la gráfica).
+# procesar los controles.
 # =====================================================================
+def _alternar_ribbon():
+    st.session_state.ribbon_oculto = not st.session_state.get('ribbon_oculto', False)
+
+
+solicitud_hmi = st.session_state.pop('hmi_accion', None)
+abrir_hmi = st.session_state.pop('hmi_reabrir', False) or solicitud_hmi is not None
+if 'hmi_tipo_pendiente' in st.session_state:
+    st.session_state.tipo_segmento = st.session_state.pop('hmi_tipo_pendiente')
+if 'hmi_clic_pendiente' in st.session_state:
+    st.session_state.modo_interaccion_secuencia = (
+        MODO_CLIC if st.session_state.pop('hmi_clic_pendiente') else MODO_MANUAL
+    )
+
+
+with st.container(key='ribbon_sg90'):
+    (tab_simulacion, tab_analisis, tab_navegacion, tab_selector_robot,
+     tab_codigo, tab_robot, tab_asistencia) = st.tabs(
+        ['Simulación', 'Análisis de Control', 'Navegación', 'Robot',
+         'Código del robot', 'Enviar al robot físico (local)', 'Asistencia']
+    )
+    with tab_simulacion, st.container(key='grupos_simulacion'):
+        col_transporte, col_tiempo, col_estado, col_puntos, col_reporte = st.columns([1.1, 1.25, 1.1, 1.5, 0.8])
+        with col_transporte:
+            hay_pendientes = st.session_state.indice_secuencia < len(st.session_state.secuencia_operacional)
+            acciones_reproduccion = st.container(key='acciones_reproduccion')
+            b_play, b_pausa, b_stop, b_inicio = acciones_reproduccion.columns(4)
+            play = b_play.button(
+                '▶️', help='Ejecutar o reanudar segmentos pendientes; si terminaron, reproducir la trayectoria.',
+                disabled=not hay_pendientes and len(st.session_state.cuadros) < 2,
+                use_container_width=False,
+            ) or solicitud_hmi == 'ejecutar'
+            b_play.caption('Ejecutar')
+            ejecutar = play and hay_pendientes
+            reproducir = play and not hay_pendientes
+            slot_pausa = b_pausa.empty()
+            reset_wp = b_stop.button(
+                '⏹️', help='Detener y limpiar toda la secuencia.',
+                disabled=not st.session_state.secuencia_operacional,
+                use_container_width=False,
+            ) or solicitud_hmi == 'limpiar'
+            b_stop.caption('Limpiar')
+            reiniciar = b_inicio.button(
+                '↺', help='Reiniciar el brazo conservando los segmentos.',
+                use_container_width=False,
+            )
+            b_inicio.caption('Reiniciar')
+            st.caption('Reproducción')
+        with col_tiempo:
+            slot_slider = st.container()
+            multiplicador_velocidad = st.slider(
+                'Velocidad de Simulación (x)', min_value=0.5, max_value=5.0,
+                value=1.0, step=0.5,
+            )
+            st.caption('Línea de tiempo')
+        with col_estado:
+            tipo_segmento = st.selectbox(
+                'Estado operacional', TIPOS_SEGMENTO, key='tipo_segmento',
+                help='Tipo del siguiente segmento: posicionamiento, pausa o soldadura.',
+            )
+            slot_tabla = st.empty()
+            st.caption('Secuencia')
+        with col_puntos:
+            consola = st.container(width=360)
+            st.caption('Puntos')
+        with col_reporte:
+            with st.container(key='acciones_reporte'):
+                col_txt, col_html = st.columns(2, gap=None)
+                slot_reporte = col_txt.empty()
+                col_txt.caption('TXT')
+                completo = col_html.button(
+                    '🎥', key='reporte_completo_sg90', disabled=len(st.session_state.cuadros) < 2,
+                    help='Crear un HTML con video y resumen matemático; requiere una simulación calculada.',
+                )
+                col_html.caption('HTML')
+            st.caption('Reportes')
+    with tab_analisis, st.container(key='grupos_analisis'):
+        col_control, col_fallas, col_ganancias = st.columns(3)
+        with col_control:
+            modo = st.selectbox('Modo de control', MODOS, index=2)
+            if modo in MODOS_NO_DISPONIBLES:
+                st.warning(f'🚧 **No disponible para el robot SG90.** {MODOS_NO_DISPONIBLES[modo]}')
+            elif modo == 'PID':
+                st.warning(f'⚠️ {AVISO_PID}')
+            st.caption('Controlador')
+        with col_fallas:
+            falla_sensor = st.toggle("Falla de Sensor", key="falla_sensor")
+            falla_m2 = st.toggle("Falla M2 (codo)", key="falla_m2")
+            control_optimo = st.toggle("Control Óptimo", key="control_optimo")
+            st.caption('Análisis diagnóstico: no modifica el movimiento del brazo.')
+            st.caption('Diagnóstico')
+        with col_ganancias:
+            ganancia_p, ganancia_d, ganancia_i = st.columns(3)
+            Kp = ganancia_p.slider('Kp', 0.001, 0.2, KP_INICIAL, 0.001, format='%.3f')
+            Kd = ganancia_d.slider('Kd', 0.0, 0.05, KD_INICIAL, 0.0005, format='%.4f')
+            Ki = ganancia_i.slider('Ki', 0.0, 0.05, KI_INICIAL, 0.001, format='%.3f')
+            st.caption('Ganancias')
+    with tab_navegacion:
+        with st.container(width=180, key='navegacion_ribbon'):
+            st.page_link("app.py", label="🏠", help="Abrir la página central.", use_container_width=False)
+            st.caption('Inicio')
+    with tab_selector_robot:
+        with st.container(key='selector_robot_ribbon'):
+            modelo_sg90, modelo_generico = st.columns(2)
+            with modelo_sg90:
+                st.page_link(
+                    "pages/8_Simulador_Brazo_SG90.py", label="🤖",
+                    help="Abrir el robot de 2 GDL SG90: eslabones de 100 + 100 mm.", use_container_width=False,
+                )
+                st.caption('2 GDL · SG90')
+            with modelo_generico:
+                st.page_link(
+                    "pages/7_Simulador_Brazo_Robotico.py", label="🦾",
+                    help="Abrir el robot de 2 GDL genérico: simulador original del brazo de 9 m.", use_container_width=False,
+                )
+                st.caption('2 GDL · Genérico')
+    with st.container(key='ribbon_handle'):
+        ribbon_oculto = st.session_state.get('ribbon_oculto', False)
+        accion_ribbon = 'Mostrar barra superior' if ribbon_oculto else 'Ocultar barra superior'
+        st.button(
+            accion_ribbon,
+            icon=':material/keyboard_arrow_down:' if ribbon_oculto else ':material/keyboard_arrow_up:',
+            key='alternar_ribbon',
+            help=accion_ribbon,
+            on_click=_alternar_ribbon,
+            use_container_width=True,
+        )
+
 fila1 = st.columns([1.2, 1])
-consola = st.container(border=True)
 fila3 = st.columns(2)
 
 mlp = None  # la RNA no está disponible para el SG90
@@ -694,55 +1273,115 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ---- Columna izquierda: título, slider y gráfica ----
+# ---- Columna izquierda: título y gráfica ----
 with fila1[0]:
     st.markdown('## Laboratorio de Control Digital · Brazo 2-DOF SG90')
-    slot_slider = st.container()
     ui_grafica_robot = st.empty()
 
-# ---- Columna derecha: resumen matemático y, justo debajo, los botones de acción ----
+# ---- Columna derecha: resumen matemático y métricas ----
 with fila1[1]:
     slot_resumen = st.container()
-    b_ejecutar, b_reiniciar, b_reset = st.columns(3)
-    ejecutar = b_ejecutar.button('Ejecutar', use_container_width=True)
-    reiniciar = b_reiniciar.button('Reiniciar Brazo', use_container_width=True)
-    reset_wp = b_reset.button('Reset Waypoints', use_container_width=True)
     slot_metricas = st.container()
-# ---- Fila 2: consola de control horizontal ----
+# ---- Editor de segmentos dentro del Ribbon ----
 with consola:
-    col_modo, col_gan, col_wp = st.columns(3)
-    with col_modo:
-        modo = st.radio('Modo de control', MODOS, index=2, horizontal=True)
-        if modo in MODOS_NO_DISPONIBLES:
-            st.warning(f'🚧 **No disponible para el robot SG90.** {MODOS_NO_DISPONIBLES[modo]}')
-        elif modo == 'PID':
-            st.warning(f'⚠️ {AVISO_PID}')
-        st.caption('Robot: L1 = L2 = 100 mm, 50 g por eslabón, torque pico 0.15 N·m. '
-                   'q1 y q2 limitados a 5°–170° (codo q2 ≥ 0).')
-    with col_gan:
-        Kp = st.slider('Kp', 0.001, 0.2, KP_INICIAL, 0.001, format='%.3f')
-        Kd = st.slider('Kd', 0.0, 0.05, KD_INICIAL, 0.0005, format='%.4f')
-        Ki = st.slider('Ki', 0.0, 0.05, KI_INICIAL, 0.001, format='%.3f')
-        multiplicador_velocidad = st.slider('Velocidad de Simulación (x)', min_value=0.5, max_value=5.0,
-                                            value=1.0, step=0.5)
+    col_wp = st.container()
     with col_wp:
-        modo_interaccion = st.radio('Interacción con waypoints', (MODO_CLIC, MODO_MANUAL), horizontal=True)
-        interactivo = modo_interaccion == MODO_CLIC
-        st.session_state.interactivo = interactivo
-        if interactivo:
-            st.caption('Haz clic sobre la zona sombreada del plano para añadir un waypoint (resolución 5 mm).')
-            anadir = False
+        modo_puntos, mando_puntos = st.columns([1.8, 1], vertical_alignment='bottom')
+        with mando_puntos, st.container(key='abrir_hmi_sg90'):
+            boton_hmi = st.button('Control HMI', key='abrir_teach_pendant', help='Mando virtual del SG90 con movimiento en vivo USB opcional.')
+        interactivo = False
+        if tipo_segmento == ESTADO_LIBRE:
+            interactivo = modo_puntos.radio(
+                'Definir el punto',
+                (MODO_CLIC, MODO_MANUAL),
+                horizontal=True,
+                key='modo_interaccion_secuencia',
+                format_func=lambda opcion: '⌖ Clic' if opcion == MODO_CLIC else '✎ Manual',
+                help='Clic: seleccionar un punto en la gráfica. Manual: escribir sus coordenadas X/Y en mm.',
+            ) == MODO_CLIC
+        anadir = anadir_pausa_click = anadir_soldadura_click = False
+        error_plan_soldadura = None
+        if tipo_segmento == ESTADO_SOLDADURA:
+            formato_puntos = st.radio(
+                'Definir puntos A/X',
+                ('Cartesianas (mm)', 'Articulares (°)'),
+                horizontal=True,
+                key='formato_puntos_soldadura',
+                format_func=lambda opcion: 'XY' if opcion == 'Cartesianas (mm)' else 'q°',
+                help='XY: puntos A/X en milímetros. q°: ángulos de hombro y codo en grados.',
+            )
+            if formato_puntos == 'Cartesianas (mm)':
+                col_a, col_x = st.columns(2)
+                with col_a:
+                    st.markdown('**Punto A**')
+                    ax = st.number_input('x_A (mm)', -200.0, 200.0, 28.45, 0.5, key='soldadura_ax')
+                    ay = st.number_input('y_A (mm)', -200.0, 200.0, 161.34, 0.5, key='soldadura_ay')
+                with col_x:
+                    st.markdown('**Punto X**')
+                    xx = st.number_input('x_X (mm)', -200.0, 200.0, -36.60, 0.5, key='soldadura_xx')
+                    xy = st.number_input('y_X (mm)', -200.0, 200.0, 136.60, 0.5, key='soldadura_xy')
+                punto_a, punto_x = (ax, ay), (xx, xy)
+                q_a, q_x = ik(*punto_a), ik(*punto_x)
+            else:
+                col_a, col_x = st.columns(2)
+                with col_a:
+                    st.markdown('**Punto A**')
+                    q1_a = st.number_input('q1_A (°)', Q_MIN_DEG, Q_MAX_DEG, 45.0, 1.0, key='soldadura_q1a')
+                    q2_a = st.number_input('q2_A (°)', Q_MIN_DEG, Q_MAX_DEG, 70.0, 1.0, key='soldadura_q2a')
+                with col_x:
+                    st.markdown('**Punto X**')
+                    q1_x = st.number_input('q1_X (°)', Q_MIN_DEG, Q_MAX_DEG, 60.0, 1.0, key='soldadura_q1x')
+                    q2_x = st.number_input('q2_X (°)', Q_MIN_DEG, Q_MAX_DEG, 90.0, 1.0, key='soldadura_q2x')
+                q_a = tuple(np.radians([q1_a, q2_a]))
+                q_x = tuple(np.radians([q1_x, q2_x]))
+                xa, ya = fk(*q_a)
+                xx_all, yx_all = fk(*q_x)
+                punto_a, punto_x = (xa[2], ya[2]), (xx_all[2], yx_all[2])
+
+            if q_a[0] is None or q_x[0] is None:
+                error_plan_soldadura = 'A y X deben ser alcanzables dentro del espacio de trabajo y los límites articulares.'
+                st.error(error_plan_soldadura)
+            else:
+                try:
+                    construir_plan_soldadura(st.session_state.estado['q'], punto_a, punto_x)
+                except ValueError as exc:
+                    error_plan_soldadura = str(exc)
+                    st.error(error_plan_soldadura)
+                else:
+                    st.caption(
+                        f'A=({punto_a[0]:.1f}, {punto_a[1]:.1f}) mm · '
+                        f'X=({punto_x[0]:.1f}, {punto_x[1]:.1f}) mm · '
+                        'aproximación a A + pasada cartesiana recta A→X.'
+                    )
+            anadir_soldadura_click = st.button(
+                'A→X', help='Añadir a la secuencia una aproximación a A y una pasada virtual recta hasta X.',
+                use_container_width=False,
+                disabled=error_plan_soldadura is not None,
+            )
+            st.caption('Añadir tramo')
+            st.caption('Trayectoria virtual: no activa una antorcha ni un arco físico.')
+        elif tipo_segmento == ESTADO_LIBRE:
+            if interactivo:
+                st.caption('Haz clic en el plano para agregar este punto de posicionamiento a la secuencia.')
+            else:
+                cx, cy, c_anadir = st.columns([1, 1, 0.5], vertical_alignment='bottom')
+                wx = cx.number_input('X (mm)', -200.0, 200.0, 60.0, 5.0, key='secuencia_x')
+                wy = cy.number_input('Y (mm)', -200.0, 200.0, 120.0, 5.0, key='secuencia_y')
+                anadir = c_anadir.button('+', help='Añadir el punto X/Y a la secuencia de posicionamientos.',
+                                        use_container_width=False)
         else:
-            cx, cy = st.columns(2)
-            wx = cx.number_input('X (mm)', -200.0, 200.0, 60.0, 5.0)
-            wy = cy.number_input('Y (mm)', -200.0, 200.0, 120.0, 5.0)
-            anadir = st.button('Añadir Waypoint', use_container_width=True)
+            st.caption('Añade una pausa: la secuencia se detendrá aquí y conservará la pose hasta que pulses ▶️.')
+            anadir_pausa_click = st.button(
+                '⏸', help='Insertar una pausa operacional. La secuencia esperará a que pulses Ejecutar.',
+                use_container_width=False,
+            )
+            st.caption('Añadir pausa')
+        st.session_state.interactivo = interactivo
         st.caption('Obstáculos no disponibles en esta versión.')
         modo_obs = False
         st.session_state.clic_obstaculo = False
         anadir_obs = aleatorios = borrar_obs = False
         aviso_wp = st.container()
-        slot_tabla = st.empty()
 
 modelo_rl, ruta_rl = None, None
 
@@ -750,36 +1389,138 @@ modelo_rl, ruta_rl = None, None
 if anadir:
     if not agregar_waypoint(wx, wy):
         aviso_wp.warning('Punto fuera del espacio de trabajo: exige r ≤ 200 mm, q1 y q2 entre 5° y 170° y codo q2 ≥ 0.')
+    else:
+        st.rerun()
+
+if anadir_pausa_click:
+    agregar_pausa()
+    st.rerun()
+
+if anadir_soldadura_click:
+    error = agregar_soldadura(punto_a, punto_x)
+    if error:
+        aviso_wp.error(error)
+    else:
+        st.rerun()
 
 if reiniciar:
     reiniciar_estado_fisico()
+    st.rerun()
 obstaculos_activos = ()
 if reset_wp:
+    st.session_state.secuencia_operacional = []
     st.session_state.waypoints = []
     reiniciar_estado_fisico()
+    if solicitud_hmi:
+        st.session_state.hmi_reabrir = True
+        st.session_state.hmi_q = Q_INICIAL.copy()
+        st.session_state.hmi_a = None
+        st.session_state.hmi_animar = False
+        xs_hmi, ys_hmi = fk(*Q_INICIAL)
+        st.session_state.hmi_x, st.session_state.hmi_y = float(xs_hmi[-1]), float(ys_hmi[-1])
+    st.rerun()
 
-# Lista numérica compartida por ambos modos de interacción
-if st.session_state.waypoints:
+# Resumen único de los segmentos, independientemente de su estado
+if st.session_state.secuencia_operacional:
     slot_tabla.dataframe(
-        [{'#': i + 1, 'X (mm)': round(w[0], 1), 'Y (mm)': round(w[1], 1), 'θ1 (°)': round(float(np.degrees(w[2])), 1),
-          'θ2 (°)': round(float(np.degrees(w[3])), 1)} for i, w in enumerate(st.session_state.waypoints)],
-        hide_index=True, height=min(35 * (len(st.session_state.waypoints) + 1), 180), use_container_width=True)
+        [
+            {
+                '#': i + 1,
+                'Estado': segmento['tipo'],
+                'Detalle': formatear_segmento(segmento),
+                'Progreso': (
+                    'Completado' if i < st.session_state.indice_secuencia else
+                    'En pausa' if st.session_state.pausa_activa and i == st.session_state.indice_secuencia - 1 else
+                    'Siguiente' if i == st.session_state.indice_secuencia else
+                    'Pendiente'
+                ),
+            }
+            for i, segmento in enumerate(st.session_state.secuencia_operacional)
+        ],
+        hide_index=True,
+        height=min(35 * (len(st.session_state.secuencia_operacional) + 1), 220),
+        use_container_width=True,
+    )
 
-animar = False
 if ejecutar:
-    if not st.session_state.waypoints:
-        st.warning('Añade al menos un waypoint.')
-    elif modo in MODOS_NO_DISPONIBLES:
+    if modo in MODOS_NO_DISPONIBLES:
         st.warning(f'El modo "{modo}" no está disponible para el SG90. Elige Cinemático o PID + Feedforward.')
+        if solicitud_hmi:
+            st.session_state.hmi_aviso = ('error', 'Elige un controlador disponible en Análisis de Control.')
     else:
         try:
-            wps = tuple(tuple(float(v) for v in w) for w in st.session_state.waypoints)
-            st.session_state.cuadros, st.session_state.estado = simular_cacheado(
-                st.session_state.estado, wps, modo, float(Kp), float(Kd), float(Ki), mlp, modelo_rl, '', ())
-            st.session_state.cuadro_sel = max(len(st.session_state.cuadros) - 1, 0)
-            animar = True
+            estado_anterior = {k: v.copy() for k, v in st.session_state.estado.items()}
+            pausa_anterior = st.session_state.pausa_activa
+            st.session_state.pausa_activa = False
+            cuadros_nuevos = list(st.session_state.cuadros)
+            inicio_reproduccion = len(cuadros_nuevos)
+            indice = st.session_state.indice_secuencia
+            while indice < len(st.session_state.secuencia_operacional):
+                segmento = st.session_state.secuencia_operacional[indice]
+                if segmento['tipo'] == ESTADO_REPOSO:
+                    cuadro = cuadro_reposo(st.session_state.estado)
+                    cuadros_nuevos.append(cuadro)
+                    indice += 1
+                    st.session_state.pausa_activa = True
+                    break
+
+                if segmento['tipo'] == ESTADO_LIBRE:
+                    waypoints = []
+                    conexion_hmi = segmento.get('conexion_hmi')
+                    while (
+                        indice < len(st.session_state.secuencia_operacional)
+                        and st.session_state.secuencia_operacional[indice]['tipo'] == ESTADO_LIBRE
+                        and st.session_state.secuencia_operacional[indice].get('conexion_hmi') == conexion_hmi
+                    ):
+                        waypoints.append(st.session_state.secuencia_operacional[indice]['waypoint'])
+                        indice += 1
+                    plan_hmi = (
+                        planificar_recorrido(
+                            st.session_state.estado['q'], [w[:2] for w in waypoints], fk, ik,
+                            PASOS_POR_TRAMO, curvas=conexion_hmi == 'curvas',
+                        ) if conexion_hmi else None
+                    )
+                    cuadros_segmento = simular(
+                        st.session_state.estado, waypoints, modo, float(Kp), float(Kd), float(Ki),
+                        mlp, modelo_rl, estado_operacional=ESTADO_LIBRE, trayectoria_posicionamiento=plan_hmi,
+                    )
+                else:
+                    plan = construir_plan_soldadura(
+                        st.session_state.estado['q'], segmento['punto_a'], segmento['punto_x']
+                    )
+                    cuadros_segmento = simular(
+                        st.session_state.estado, (), modo, float(Kp), float(Kd), float(Ki),
+                        mlp, modelo_rl, plan_soldadura=plan, estado_operacional=ESTADO_SOLDADURA,
+                    )
+                    indice += 1
+
+                for cuadro in cuadros_segmento:
+                    cuadro['estado_operacional'] = segmento['tipo']
+                cuadros_nuevos.extend(cuadros_segmento)
+
+            st.session_state.indice_secuencia = indice
+            st.session_state.cuadros = cuadros_nuevos
+            st.session_state.cuadro_sel = min(inicio_reproduccion, max(len(cuadros_nuevos) - 1, 0))
+            st.session_state.reproducir_pendiente = True
+            if solicitud_hmi:
+                st.session_state.hmi_reabrir = True
+                st.session_state.hmi_animar = True
+                st.session_state.hmi_q = st.session_state.estado['q'].copy()
+                xs_hmi, ys_hmi = fk(*st.session_state.hmi_q)
+                st.session_state.hmi_x, st.session_state.hmi_y = float(xs_hmi[-1]), float(ys_hmi[-1])
+                st.session_state.hmi_aviso = (
+                    'info', 'En Reposo: pulsa Ejecutar para continuar.' if st.session_state.pausa_activa
+                    else 'Recorrido virtual calculado.',
+                )
+            if st.session_state.pausa_activa:
+                st.info('La secuencia está en Reposo. La pose se mantiene; pulsa ▶️ para seguir.')
+            st.rerun()
         except Exception as e:
+            st.session_state.estado = estado_anterior
+            st.session_state.pausa_activa = pausa_anterior
             st.error(f'No se pudo ejecutar la simulación: {e}')
+            if solicitud_hmi:
+                st.session_state.hmi_aviso = ('error', f'No se pudo ejecutar: {e}')
 
 cuadros = st.session_state.cuadros
 
@@ -811,69 +1552,6 @@ def ruta_efector(qs):
     return np.column_stack([xs[2], ys[2]])
 
 
-def figura_animacion(trayectoria, multiplicador, pasos_por_frame=4):
-    """Figura Plotly con la trayectoria completa como `go.Frame` (1 de cada `pasos_por_frame` pasos).
-    La reproducción (Play/Pause) corre en el navegador; la duración del frame sigue a la velocidad elegida."""
-    n = len(trayectoria)
-    ks = list(range(0, n - 1, pasos_por_frame)) + [n - 1]
-    ideal = ruta_efector([c['q_d'] for c in trayectoria])
-    real = ruta_efector([c['q'] for c in trayectoria])
-    qs = np.array([c['q'] for c in trayectoria])
-    x_b, y_b = fk(qs[:, 0], qs[:, 1])
-    duracion_ms = int(1000 * dt * pasos_por_frame / multiplicador)
-
-    fig = figura_plotly(0, interactivo=False, con_rejilla=False)  # estado inicial
-    idx = {t.name: i for i, t in enumerate(fig.data)}
-    i_ideal, i_brazo = idx['Ruta Ideal (Setpoint)'], idx['Brazo']
-    i_real = i_ideal + 1  # la ruta real se añade justo después de la ideal
-    i_obs = [idx[f'Obstáculo {i + 1}'] for i in range(len(obstaculos_activos))]
-    golpes = contactos_obstaculos(qs, obstaculos_activos)
-
-    def estilo_obs(k, j):
-        relleno, borde = COLOR_OBS_HIT if golpes[k, j] else COLOR_OBS
-        return go.Scatter(fillcolor=relleno, line=dict(color=borde, width=2))
-
-    fig.frames = [go.Frame(
-        name=str(k), traces=[i_ideal, i_real, i_brazo] + i_obs,
-        data=[go.Scatter(x=ideal[:k + 1, 0], y=ideal[:k + 1, 1]),
-              go.Scatter(x=real[:k + 1, 0], y=real[:k + 1, 1]),
-              go.Scatter(x=[0, x_b[1][k], x_b[2][k]], y=[0, y_b[1][k], y_b[2][k]])]
-             + [estilo_obs(k, j) for j in range(len(i_obs))]) for k in ks]
-    fig.update_layout(title=dict(text='Visualización del Robot'))
-    return fig, duracion_ms
-
-
-def html_animacion(trayectoria, multiplicador):
-    """Animación Plotly con los botones Play/Pause en una columna a la izquierda de la gráfica.
-    Se incrusta como HTML para poder controlar la animación en el navegador sin reruns."""
-    fig, duracion_ms = figura_animacion(trayectoria, multiplicador)
-    div = fig.to_html(full_html=False, include_plotlyjs='cdn', div_id='anim_brazo', auto_play=False,
-                      config=dict(responsive=True, displaylogo=False))
-    return f"""
-<meta charset="utf-8">
-<style>
-  html, body {{ margin: 0; background: transparent; font-family: 'Source Sans', sans-serif; overflow: hidden; }}
-  .fila {{ display: flex; gap: 12px; align-items: flex-start; }}
-  .controles {{ flex: 1.5; min-width: 0; display: flex; flex-direction: column; gap: 12px; padding-top: 52px; }}
-  .grafica {{ flex: 10.5; min-width: 0; }}
-  .btn {{ width: 100%; min-height: 56px; padding: 0 6px; border-radius: 8px; font-size: 14px; white-space: nowrap; cursor: pointer;
-          transition: transform 160ms ease, box-shadow 160ms ease, border-color 160ms ease; }}
-  .btn:hover {{ transform: translateY(-2px); }}
-  .play {{ border: 1px solid #38bdf8; background: #38bdf8; color: #0f172a; font-weight: 700; }}
-  .play:hover {{ box-shadow: 0 0 14px rgba(56, 189, 248, 0.55); }}
-  .pause {{ border: 1px solid #374151; background: #1e293b; color: #e2e8f0; font-weight: 600; }}
-  .pause:hover {{ border-color: #38bdf8; box-shadow: 0 0 10px rgba(56, 189, 248, 0.25); }}
-</style>
-<div class="fila">
-  <div class="controles">
-    <button class="btn play" onclick="Plotly.animate('anim_brazo', null, {{frame: {{duration: {duracion_ms}, redraw: false}}, transition: {{duration: 0}}, fromcurrent: true, mode: 'immediate'}})">▶ Play</button>
-    <button class="btn pause" onclick="Plotly.animate('anim_brazo', [null], {{frame: {{duration: 0, redraw: false}}, transition: {{duration: 0}}, mode: 'immediate'}})">⏸ Pause</button>
-  </div>
-  <div class="grafica">{div}</div>
-</div>
-"""
-
-
 @st.cache_data
 def rejilla_alcanzable():
     """Puntos (invisibles) del espacio de trabajo que reciben el clic y muestran las coordenadas al pasar el cursor.
@@ -898,10 +1576,10 @@ def trazo_obstaculo(i, ox, oy, r, tocado):
                 hoverinfo='text', text=f'Obstáculo {i + 1}: x={ox:.2f}, y={oy:.2f}, r={r:.2f} m')
 
 
-def figura_plotly(k, interactivo, con_rejilla=True):
+def figura_plotly(k, interactivo, con_rejilla=True, q_vista=None):
     """Plano del robot con Plotly en el cuadro k (clic en el modo interactivo, retícula fina en el manual).
     con_rejilla=False omite la malla invisible de captura de clics (más ligero durante la animación)."""
-    q = cuadros[k]['q'] if cuadros else st.session_state.estado['q']
+    q = q_vista if q_vista is not None else cuadros[k]['q'] if cuadros else st.session_state.estado['q']
     fig = go.Figure()
 
     for radio, relleno in ((L1 + L2, 'rgba(51,65,85,0.18)'), (abs(L1 - L2), COLOR_FONDO)):
@@ -927,12 +1605,28 @@ def figura_plotly(k, interactivo, con_rejilla=True):
                         name='Ruta RNA (Predictiva)' if con_rna else 'Ruta Real (Robot)',
                         line=dict(color=COLOR_RNA if con_rna else COLOR_ACENTO, width=3 if con_rna else 2))
 
-    if st.session_state.waypoints:
-        wps = np.array([w[:2] for w in st.session_state.waypoints])
-        fig.add_scatter(x=wps[:, 0], y=wps[:, 1], mode='markers+text', name='Waypoints', hoverinfo='skip',
-                        text=[str(i + 1) for i in range(len(wps))], textposition='top right',
-                        textfont=dict(color=COLOR_TEXTO),
-                        marker=dict(color=COLOR_RNA, size=10, line=dict(color=COLOR_FONDO, width=1)))
+    numero_punto = 0
+    for indice, segmento in enumerate(st.session_state.get('secuencia_operacional', ())):
+        if segmento['tipo'] == ESTADO_SOLDADURA:
+            extremos = np.array([w[:2] for w in segmento['waypoints']])
+            fig.add_scatter(
+                x=extremos[:, 0], y=extremos[:, 1], mode='lines+markers+text',
+                name=f'Soldadura {indice + 1} A→X', hoverinfo='skip',
+                text=['A', 'X'], textposition='top right',
+                textfont=dict(color=COLOR_TEXTO),
+                line=dict(color=COLOR_IDEAL, dash='dash', width=3),
+                marker=dict(color=[COLOR_RNA, COLOR_IDEAL], size=12, line=dict(color=COLOR_FONDO, width=1)),
+            )
+        elif segmento['tipo'] == ESTADO_LIBRE:
+            numero_punto += 1
+            x, y = segmento['waypoint'][:2]
+            fig.add_scatter(
+                x=[x], y=[y], mode='markers+text', name='Posicionamiento' if numero_punto == 1 else None,
+                hoverinfo='skip', text=[str(numero_punto)], textposition='top right',
+                textfont=dict(color=COLOR_TEXTO),
+                marker=dict(color=COLOR_RNA, size=10, line=dict(color=COLOR_FONDO, width=1)),
+                showlegend=numero_punto == 1,
+            )
 
     xs, ys = fk(q[0], q[1])
     fig.add_scatter(x=xs, y=ys, mode='lines+markers', name='Brazo', hoverinfo='skip',
@@ -946,7 +1640,7 @@ def figura_plotly(k, interactivo, con_rejilla=True):
                         unselected=dict(marker=dict(opacity=0.01)), selected=dict(marker=dict(opacity=0.01)),
                         hovertemplate='X = %{x:.1f} mm<br>Y = %{y:.1f} mm<extra></extra>')
 
-    eje = dict(range=[-230, 230], gridcolor=COLOR_GRID, zerolinecolor=COLOR_BORDE, dtick=50,
+    eje = dict(range=[-200, 200], gridcolor=COLOR_GRID, zerolinecolor=COLOR_BORDE, dtick=50,
                tickfont=dict(color=COLOR_TEXTO_SEC), linecolor=COLOR_GRID, title=dict(text='mm', font=dict(color=COLOR_TEXTO_SEC)))
     if not interactivo:
         # Retícula secundaria fina, punteada y discreta cada 10 mm
@@ -959,8 +1653,267 @@ def figura_plotly(k, interactivo, con_rejilla=True):
         legend=dict(font=dict(color=COLOR_TEXTO, size=11), bgcolor='rgba(15,23,42,0.8)',
                     bordercolor=COLOR_GRID, borderwidth=1, x=0.99, xanchor='right', y=0.99),
         hoverlabel=dict(bgcolor=COLOR_FONDO, font=dict(color=COLOR_TEXTO)),
-        dragmode=False if interactivo else 'zoom', clickmode='event+select')
+        dragmode=False if interactivo else 'zoom', clickmode='event+select',
+        uirevision='animacion')
     return fig
+
+
+def resumen_animacion(cuadro, indice, total):
+    q, dq = cuadro['q'], cuadro['dq']
+    M, _, G = dinamica_completa(q, dq)
+    xs, ys = fk(q[0], q[1])
+    J = calcular_jacobiano(q)
+    A, B = matrices_estado_continuo(q, M)
+    Phi, Gamma, *_ = cont2discrete((A, B, np.eye(4), np.zeros((4, 2))), dt, method='zoh')
+    waypoints = waypoints_operacionales()
+    t1_ik, t2_ik = waypoints[-1][2:] if waypoints else (None, None)
+    if t1_ik is None:
+        ik_html = 'N/A (añade un waypoint)'
+    else:
+        ik_html = (
+            rf'\[\theta_1 = {np.degrees(t1_ik):.2f}^\circ, '
+            rf'\quad \theta_2 = {np.degrees(t2_ik):.2f}^\circ\]'
+        )
+    operacion = cuadro.get(
+        'estado_operacional', st.session_state.get('estado_operacional', ESTADO_LIBRE)
+    )
+    estado_html = (
+        f'<div class="nota">Estado: {operacion} · '
+        f'Fase: {cuadro.get("fase_operacional", "Sin trayectoria")}</div>'
+    )
+    if 'error_cartesiano_mm' in cuadro:
+        estado_html += (
+            f'<div class="nota">Error cartesiano durante la pasada: '
+            f'{cuadro["error_cartesiano_mm"]:.2f} mm</div>'
+        )
+
+    return f"""
+<div class="resumen-encabezado">Resumen Matemático</div>
+{estado_html}
+<div class="seccion"><b>1. Estado Articular</b>
+\\[q = \\begin{{bmatrix}} {np.degrees(q[0]):.2f}^\\circ \\\\ {np.degrees(q[1]):.2f}^\\circ \\end{{bmatrix}},
+\\quad \\dot{{q}} = \\begin{{bmatrix}} {dq[0]:.2f} \\\\ {dq[1]:.2f} \\end{{bmatrix}}\\,\\mathrm{{rad/s}}\\]</div>
+<div class="seccion"><b>2. Cinemática Directa (FK)</b>
+\\[x = {xs[2]:.2f}\\,\\text{{mm}}, \\quad y = {ys[2]:.2f}\\,\\text{{mm}}\\]</div>
+<div class="seccion"><b>3. Cinemática Inversa (IK)</b>
+{ik_html}</div>
+<div class="seccion"><b>4. Jacobiano J(q) (mm/rad)</b>
+\\[J = {matriz_latex(J)}\\]</div>
+<div class="seccion"><b>5. Modelo Dinámico</b>
+\\[\\tau = M(q)\\,\\ddot{{q}} + C(q,\\dot{{q}})\\,\\dot{{q}} + G(q)\\]
+\\[M = {matriz_latex(M, 1e3)}\\times 10^{{-3}}\\,\\text{{kg·m}}^2, \\quad
+G = \\begin{{bmatrix}} {G[0] * 1e3:.2f} \\\\ {G[1] * 1e3:.2f} \\end{{bmatrix}}\\,\\text{{mN·m}}\\]</div>
+<div class="seccion"><b>6. Discretización del Sistema (ZOH)</b>
+<div class="nota">Estado x = [q₁, q₂, q̇₁, q̇₂]ᵀ · dt = {dt:.2f} s</div>
+\\[\\Phi = {matriz_latex(Phi)}\\]
+\\[\\Gamma = {matriz_latex(Gamma)}\\]</div>
+<div class="progreso">Cuadro {indice + 1} de {total}</div>
+"""
+
+
+def figura_animacion(trayectoria):
+    """Construye la figura Plotly; la animación se lanza en el navegador."""
+    ks = list(range(0, len(trayectoria), PASOS_POR_FRAME))
+    if ks[-1] != len(trayectoria) - 1:
+        ks.append(len(trayectoria) - 1)
+
+    qs = np.asarray([cuadro['q'] for cuadro in trayectoria])
+    ideal = ruta_efector([cuadro['q_d'] for cuadro in trayectoria])
+    real = ruta_efector(qs)
+    x_b, y_b = fk(qs[:, 0], qs[:, 1])
+
+    fig = figura_plotly(0, interactivo=False, con_rejilla=False)
+    indices = {trazo.name: i for i, trazo in enumerate(fig.data)}
+    i_ideal = indices['Ruta Ideal (Setpoint)']
+    i_real = indices['Ruta Real (Robot)']
+    i_brazo = indices['Brazo']
+
+    fig.frames = [
+        go.Frame(
+            name=str(k),
+            traces=[i_ideal, i_real, i_brazo],
+            data=[
+                go.Scatter(x=ideal[:k + 1, 0], y=ideal[:k + 1, 1]),
+                go.Scatter(x=real[:k + 1, 0], y=real[:k + 1, 1]),
+                go.Scatter(x=[0, x_b[1][k], x_b[2][k]], y=[0, y_b[1][k], y_b[2][k]]),
+            ],
+        )
+        for k in ks
+    ]
+
+    fig.update_layout(
+        uirevision='sg90-animacion',
+    )
+    return fig, ks
+
+
+def html_animacion_grafica(trayectoria, multiplicador):
+    fig, ks = figura_animacion(trayectoria)
+    div = fig.to_html(
+        full_html=False,
+        include_plotlyjs='cdn',
+        div_id='anim_brazo_sg90',
+        auto_play=False,
+        config=dict(responsive=True, displaylogo=False, scrollZoom=True),
+    )
+    nombres_json = json.dumps([str(k) for k in ks])
+    duracion_ms = max(1, int(1000 * dt * PASOS_POR_FRAME / multiplicador))
+    canal = f"sg90-resumen-{st.session_state.get('clic_n', 0)}"
+    inicio = (
+        next((i for i, k in enumerate(ks) if k >= st.session_state.cuadro_sel), 0)
+        if st.session_state.cuadro_sel < len(trayectoria) - 1 else 0
+    )
+    return f"""
+<meta charset="utf-8">
+<style>
+  html, body {{ margin: 0; background: transparent; overflow: hidden; }}
+</style>
+<script>
+  const grafica = () => document.getElementById('anim_brazo_sg90');
+  const nombresFrames = {nombres_json};
+  const canal = new BroadcastChannel({json.dumps(canal)});
+  let iniciado = false;
+  let pausado = false;
+  let indiceActual = {inicio};
+  async function reproducirFrames() {{
+    if (iniciado) return;
+    iniciado = true;
+    const elemento = grafica();
+    try {{
+      while (indiceActual < nombresFrames.length && !pausado) {{
+        await Plotly.animate(elemento, [nombresFrames[indiceActual]], {{
+          frame: {{duration: {duracion_ms}, redraw: false}},
+          transition: {{duration: 0}},
+          mode: 'immediate',
+        }});
+        canal.postMessage({{type: 'frame', index: indiceActual}});
+        indiceActual++;
+      }}
+    }} finally {{
+      iniciado = false;
+    }}
+  }}
+  canal.onmessage = (evento) => {{
+    if (evento.data.type === 'ready') reproducirFrames();
+    if (evento.data.type === 'hello') canal.postMessage({{type: 'ready'}});
+    if (evento.data.type === 'toggle-pause') {{
+      pausado = !pausado;
+      canal.postMessage({{type: 'paused', value: pausado}});
+      if (!pausado) reproducirFrames();
+    }}
+  }};
+  function iniciarCuandoEsteLista(intentos = 0) {{
+    const elemento = grafica();
+    if (elemento && elemento._fullLayout) {{
+      canal.postMessage({{type: 'hello'}});
+    }}
+    else if (intentos < 100) setTimeout(() => iniciarCuandoEsteLista(intentos + 1), 50);
+  }}
+  iniciarCuandoEsteLista();
+</script>
+{div}
+"""
+
+
+def html_analisis_control(analisis):
+    polos_latex = r",\;".join(
+        rf"{polo.real:.1f}{polo.imag:+.1f}j" for polo in analisis['polos']
+    )
+    if analisis['K'] is None:
+        if st.session_state.get('control_optimo', False):
+            control_optimo_html = (
+                f'<div class="nota">No se puede asignar el conjunto completo de polos: '
+                f'rango de $W_c$ = {analisis["rango_controlabilidad"]}/4.</div>'
+            )
+        else:
+            control_optimo_html = '<div class="nota">Desactivado.</div>'
+    else:
+        control_optimo_html = (
+            rf'\[K = {matriz_latex(analisis["K"])}\]' +
+            rf'<div class="nota">Polos con \(\zeta \approx 0.8\): \({polos_latex}\). '
+            r'$\Delta\tau=-K\,\Delta x$; ganancia diagnóstica, no aplicada al servo.</div>'
+        )
+
+    return f"""
+<div class="seccion"><b>7. Observabilidad</b>
+<div class="nota">Linealización en q₀ = [90°, 90°], q̇₀ = 0.
+Modelo virtual; no implica lectura física de los servos.</div>
+\\[C = {matriz_latex(analisis['C'])}\\]
+\\[W_o = {matriz_latex(analisis['observabilidad'])}\\]
+<div class="nota">rango(Wₒ) = {analisis['rango_observabilidad']}/4</div></div>
+<div class="seccion"><b>8. Controlabilidad</b>
+\\[B_{{ef}} = {matriz_latex(analisis['B'])}\\]
+\\[W_c = {matriz_latex(analisis['controlabilidad'])}\\]
+<div class="nota">rango(W_c) = {analisis['rango_controlabilidad']}/4</div></div>
+<div class="seccion"><b>9. Control por asignación de polos (MIMO)</b>
+{control_optimo_html}</div>
+"""
+
+
+def html_animacion_resumen(trayectoria, analisis):
+    ks = list(range(0, len(trayectoria), PASOS_POR_FRAME))
+    if ks[-1] != len(trayectoria) - 1:
+        ks.append(len(trayectoria) - 1)
+    resumenes = [resumen_animacion(trayectoria[k], k, len(trayectoria)) for k in ks]
+    resumenes_json = json.dumps(resumenes, ensure_ascii=False)
+    canal = f"sg90-resumen-{st.session_state.get('clic_n', 0)}"
+    return f"""
+<meta charset="utf-8">
+<script>
+  window.MathJax = {{
+    tex: {{inlineMath: [['\\\\(', '\\\\)']], displayMath: [['\\\\[', '\\\\]']]}},
+    startup: {{typeset: false}},
+  }};
+</script>
+<script async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
+<style>
+  html, body {{ margin: 0; background: transparent; color: #e2e8f0;
+    font-family: 'Source Sans', sans-serif; }}
+  .resumen {{ box-sizing: border-box; min-height: 560px; padding: 16px 18px;
+    border: 1px solid #334155; border-radius: 8px; background: #111827; overflow: auto; }}
+  .resumen-encabezado {{ color: #38bdf8; font-size: 1.35rem; font-weight: 700;
+    margin-bottom: 12px; }}
+  .seccion {{ margin: 9px 0; font-size: 0.92rem; }}
+  .seccion b {{ color: #e2e8f0; }}
+  .nota, .progreso {{ color: #94a3b8; font-size: 0.8rem; margin-top: 5px; }}
+  mjx-container[display="true"] {{ margin: 0.35em 0 !important; overflow-x: auto;
+    overflow-y: hidden; }}
+</style>
+<div class="resumen">
+  <div id="resumen_animacion">{resumenes[0]}</div>
+  {html_analisis_control(analisis)}
+</div>
+<script>
+  const resumenes = {resumenes_json};
+  const canal = new BroadcastChannel({json.dumps(canal)});
+  let mathjaxListo = false;
+  let framePendiente = null;
+  async function mostrarFrame(indice) {{
+    const panel = document.getElementById('resumen_animacion');
+    MathJax.typesetClear([panel]);
+    panel.innerHTML = resumenes[indice];
+    await MathJax.typesetPromise([panel]);
+  }}
+  canal.onmessage = async (evento) => {{
+    if (evento.data.type === 'hello' && mathjaxListo) {{
+      canal.postMessage({{type: 'ready'}});
+    }} else if (evento.data.type === 'frame') {{
+      if (mathjaxListo) await mostrarFrame(evento.data.index);
+      else framePendiente = evento.data.index;
+    }}
+  }};
+  async function iniciarResumen(intentos = 0) {{
+    if (window.MathJax && MathJax.startup && MathJax.startup.promise) {{
+      await MathJax.startup.promise;
+      mathjaxListo = true;
+      await MathJax.typesetPromise([document.querySelector('.resumen')]);
+      if (framePendiente !== null) await mostrarFrame(framePendiente);
+      canal.postMessage({{type: 'ready'}});
+    }} else if (intentos < 200) setTimeout(() => iniciarResumen(intentos + 1), 50);
+  }}
+  iniciarResumen();
+</script>
+"""
 
 
 def mostrar_plano(contenedor, k):
@@ -1059,16 +2012,63 @@ def figura_polos(M):
     return fig
 
 
-def discretizar_lazo_abierto(q, M):
-    """Modelo de 4 estados x = [q1, q2, dq1, dq2] linealizado en q, en lazo abierto, y su discretización ZOH.
-    Devuelve (Phi, Gamma, eigenvalores de Phi, coeficientes de P(z))."""
+def matrices_estado_continuo(q, M):
+    """Matrices A y B del modelo linealizado para x = [q1, q2, dq1, dq2]."""
     a = m2 * (LM2 / 2) * g * np.sin(q[0] + q[1])
     Kg = -np.array([[(m1 * LM1 / 2 + m2 * LM1) * g * np.sin(q[0]) + a, a],
                     [a, a]])                       # dG/dq
-    Minv = np.linalg.inv(M)
+    Minv = np.linalg.solve(M, np.eye(2))
     A = np.block([[np.zeros((2, 2)), np.eye(2)],
                   [-Minv @ Kg, -Minv * B_VISC]])
     B = np.vstack([np.zeros((2, 2)), Minv])
+    return A, B
+
+
+def analizar_controlabilidad_observabilidad(q_operacion, falla_sensor, falla_m2, control_optimo):
+    """Analiza el modelo linealizado y, si es controlable, asigna polos por realimentación de estados."""
+    M, _, _ = dinamica_completa(q_operacion, np.zeros(2))
+    A, B = matrices_estado_continuo(q_operacion, M)
+    C = (np.hstack([np.eye(2), np.zeros((2, 2))])
+         if falla_sensor else np.eye(4))
+    B_efectiva = B.copy()
+    if falla_m2:
+        B_efectiva[:, 1] = 0.0
+
+    n = A.shape[0]
+    observabilidad = np.vstack([C @ np.linalg.matrix_power(A, k) for k in range(n)])
+    controlabilidad = np.hstack([np.linalg.matrix_power(A, k) @ B_efectiva for k in range(n)])
+    rango_observabilidad = int(np.linalg.matrix_rank(observabilidad))
+    rango_controlabilidad = int(np.linalg.matrix_rank(controlabilidad))
+
+    polos = np.array([-2.4 + 1.8j, -2.4 - 1.8j, -3.2 + 2.4j, -3.2 - 2.4j])
+    K = None
+    if control_optimo and rango_controlabilidad == n:
+        K = np.asarray(place_poles(A, B_efectiva, polos).gain_matrix, dtype=float)
+
+    return {
+        'A': A,
+        'B': B_efectiva,
+        'C': C,
+        'observabilidad': observabilidad,
+        'controlabilidad': controlabilidad,
+        'rango_observabilidad': rango_observabilidad,
+        'rango_controlabilidad': rango_controlabilidad,
+        'polos': polos,
+        'K': K,
+    }
+
+
+def matriz_latex(matriz, escala=1.0):
+    filas = [
+        " & ".join(f"{valor * escala:.2f}" for valor in fila)
+        for fila in np.asarray(matriz)
+    ]
+    return r"\begin{bmatrix}" + r" \\ ".join(filas) + r"\end{bmatrix}"
+
+
+def discretizar_lazo_abierto(q, M):
+    """Modelo de 4 estados x = [q1, q2, dq1, dq2] y discretización ZOH."""
+    A, B = matrices_estado_continuo(q, M)
     Phi, Gamma, *_ = cont2discrete((A, B, np.eye(4), np.zeros((4, 2))), dt, method='zoh')
     return Phi, Gamma, np.linalg.eigvals(Phi), np.poly(Phi)
 
@@ -1104,39 +2104,267 @@ def figura_plano_z(q, M):
     return fig
 
 
+def actualizar_resumen_matematico(cuadro, placeholders, indice, total, analisis):
+    """Actualiza las expresiones del resumen para un cuadro de la trayectoria."""
+    q, dq = cuadro['q'], cuadro['dq']
+    M, _, G = dinamica_completa(q, dq)
+    xs, ys = fk(q[0], q[1])
+    J = calcular_jacobiano(q)
+
+    placeholders['q'].latex(
+        rf'q = \begin{{bmatrix}} {np.degrees(q[0]):.2f}^\circ \\ '
+        rf'{np.degrees(q[1]):.2f}^\circ \end{{bmatrix}}, \quad '
+        rf'\dot{{q}} = \begin{{bmatrix}} {dq[0]:.2f} \\ {dq[1]:.2f} '
+        rf'\end{{bmatrix}}\,\mathrm{{rad/s}}'
+    )
+    placeholders['fk'].latex(rf'x = {xs[2]:.2f}\,\text{{mm}}, \quad y = {ys[2]:.2f}\,\text{{mm}}')
+
+    waypoints = waypoints_operacionales()
+    if waypoints:
+        t1_ik, t2_ik = waypoints[-1][2:]
+        placeholders['ik'].latex(
+            rf'\theta_1 = {np.degrees(t1_ik):.2f}^\circ, \quad '
+            rf'\theta_2 = {np.degrees(t2_ik):.2f}^\circ'
+        )
+    else:
+        placeholders['ik'].caption('N/A (añade un waypoint)')
+
+    placeholders['jacobiano'].latex(rf'J = {matriz_latex(J)}')
+    placeholders['inercia_gravedad'].latex(
+        rf'M = {matriz_latex(M, 1e3)} \times 10^{{-3}}\,\text{{kg·m}}^2, \quad '
+        rf'G = \begin{{bmatrix}} {G[0] * 1e3:.2f} \\ {G[1] * 1e3:.2f} '
+        rf'\end{{bmatrix}}\,\text{{mN·m}}'
+    )
+
+    A, B = matrices_estado_continuo(q, M)
+    Phi, Gamma, *_ = cont2discrete((A, B, np.eye(4), np.zeros((4, 2))), dt, method='zoh')
+    placeholders['phi'].latex(rf'\Phi = {matriz_latex(Phi)}')
+    placeholders['gamma'].latex(rf'\Gamma = {matriz_latex(Gamma)}')
+    placeholders['progreso'].caption(f'Cuadro {indice + 1} de {total}')
+    fase = cuadro.get(
+        'fase_operacional',
+        'Reposo' if estado_operacional == ESTADO_REPOSO else 'Sin trayectoria',
+    )
+    placeholders['operacion'].caption(
+        f'Estado: {cuadro.get("estado_operacional", estado_operacional)} · Fase: {fase}'
+    )
+    if 'error_cartesiano_mm' in cuadro:
+        placeholders['error_cartesiano'].caption(
+            f'Error cartesiano de pasada: {cuadro["error_cartesiano_mm"]:.2f} mm'
+        )
+    else:
+        placeholders['error_cartesiano'].empty()
+    placeholders['C'].latex(rf'C = {matriz_latex(analisis["C"])}')
+    placeholders['observabilidad'].latex(
+        rf'W_o = {matriz_latex(analisis["observabilidad"])}'
+    )
+    placeholders['rango_observabilidad'].caption(
+        f'rango(Wₒ) = {analisis["rango_observabilidad"]}/4'
+    )
+    placeholders['B_efectiva'].latex(rf'B_{{ef}} = {matriz_latex(analisis["B"])}')
+    placeholders['controlabilidad'].latex(
+        rf'W_c = {matriz_latex(analisis["controlabilidad"])}'
+    )
+    placeholders['rango_controlabilidad'].caption(
+        f'rango(Wc) = {analisis["rango_controlabilidad"]}/4'
+    )
+    if analisis['K'] is not None:
+        placeholders['ganancia'].latex(rf'K = {matriz_latex(analisis["K"])}')
+        polos = ', '.join(
+            f'{polo.real:.1f}{polo.imag:+.1f}j' for polo in analisis['polos']
+        )
+        placeholders['ganancia_info'].caption(
+            f'place_poles MIMO; ζ ≈ 0.8. Polos: {polos}. '
+            'Δτ = −K Δx; ganancia diagnóstica, no aplicada al servo.'
+        )
+    elif control_optimo:
+        placeholders['ganancia'].info(
+            f'No se pueden asignar los cuatro polos: rango(Wc) = '
+            f'{analisis["rango_controlabilidad"]}/4.'
+        )
+        placeholders['ganancia_info'].empty()
+    else:
+        placeholders['ganancia'].caption('Desactivado.')
+        placeholders['ganancia_info'].empty()
+
+
 # =====================================================================
 # DATOS DEL CUADRO MOSTRADO
 # =====================================================================
 if cuadros:
-    c = cuadros[min(st.session_state.cuadro_sel, len(cuadros) - 1)]
-    q, q_d, error, u_pid, u_ff, tau, M, G = (c[k] for k in ('q', 'q_d', 'error', 'u_pid', 'u_ff', 'tau', 'M', 'G'))
+    frame_index = min(max(int(st.session_state.get('cuadro_sel', 0)), 0), len(cuadros) - 1)
+    c = cuadros[frame_index]
+    q, dq, q_d, error, u_pid, u_ff, tau = (
+        c[k] for k in ('q', 'dq', 'q_d', 'error', 'u_pid', 'u_ff', 'tau')
+    )
 else:
     q = st.session_state.estado['q']
+    dq = st.session_state.estado['dq']
     q_d = st.session_state.estado['q_d']
-    M, G = calcular_dinamica(q)
+    frame_index = 0
     error = u_pid = u_ff = np.zeros(2)
-    tau = G
+    tau = np.zeros(2)
+
+M, _, G = dinamica_completa(q, dq)
+xs, ys = fk(q[0], q[1])
+J = calcular_jacobiano(q)
+analisis_control = analizar_controlabilidad_observabilidad(
+    Q_INICIAL, falla_sensor, falla_m2, control_optimo
+)
+reporte_control = (
+    'Análisis de control SG90 (linealización en q0 = [90°, 90°])\n'
+    f'Falla de sensor: {falla_sensor}\nFalla M2: {falla_m2}\n\n'
+    f'W_o (observabilidad):\n{np.array2string(analisis_control["observabilidad"], precision=8)}\n'
+    f'Rango W_o: {analisis_control["rango_observabilidad"]}/4\n\n'
+    f'W_c (controlabilidad):\n{np.array2string(analisis_control["controlabilidad"], precision=8)}\n'
+    f'Rango W_c: {analisis_control["rango_controlabilidad"]}/4\n'
+)
+slot_reporte.download_button(
+    '📄', reporte_control, file_name='reporte_control_sg90.txt',
+    mime='text/plain', use_container_width=False,
+    help='Descargar el reporte de W_o y W_c en texto, con las fallas seleccionadas y sus rangos.',
+)
+
+
+@st.dialog('Reporte completo · SG90', width='large')
+def _dialogo_reporte_completo():
+    indices = list(range(0, len(cuadros), PASOS_POR_FRAME))
+    if indices[-1] != len(cuadros) - 1:
+        indices.append(len(cuadros) - 1)
+    fotogramas = []
+    for indice in indices:
+        cuadro = cuadros[indice]
+        q_actual, dq_actual = cuadro['q'], cuadro['dq']
+        x_actual, y_actual = fk(*q_actual)
+        x_ideal, y_ideal = fk(*cuadro['q_d'])
+        masa, coriolis, gravedad = dinamica_completa(q_actual, dq_actual)
+        fotogramas.append({
+            'indice': indice, 'tiempo_ms': indice * dt * 1000 / multiplicador_velocidad,
+            'q': np.degrees(q_actual).tolist(), 'dq': np.asarray(dq_actual).tolist(),
+            'brazo': [[float(x), float(y)] for x, y in zip(x_actual, y_actual)],
+            'real': [float(x_actual[-1]), float(y_actual[-1])],
+            'ideal': [float(x_ideal[-1]), float(y_ideal[-1])],
+            'j': calcular_jacobiano(q_actual).tolist(), 'm': masa.tolist(), 'c': coriolis.tolist(),
+            'g': gravedad.tolist(), 'tau': np.asarray(cuadro['tau']).tolist(),
+            'operacion': cuadro.get('estado_operacional', ESTADO_LIBRE),
+            'fase': cuadro.get('fase_operacional', 'Sin trayectoria'),
+        })
+    phi, gamma, _, _ = discretizar_lazo_abierto(q, M)
+    _, coriolis, _ = dinamica_completa(q, dq)
+    waypoints = waypoints_operacionales()
+    secuencia_texto = '; '.join(
+        f'{i + 1}. {segmento["tipo"]}: ' +
+        (f'{segmento["waypoint"][0]:.2f}, {segmento["waypoint"][1]:.2f} mm'
+         if segmento['tipo'] == ESTADO_LIBRE else
+         ' → '.join(f'({p[0]:.2f}, {p[1]:.2f}) mm' for p in segmento['waypoints'])
+         if segmento['tipo'] == ESTADO_SOLDADURA else 'pausa')
+        for i, segmento in enumerate(st.session_state.secuencia_operacional)
+    ) or 'Sin segmentos'
+    duracion_ms = fotogramas[-1]['tiempo_ms'] + dt * PASOS_POR_FRAME * 1000 / multiplicador_velocidad
+    datos = {
+        'cuadros': fotogramas, 'total': len(cuadros), 'duracion_ms': duracion_ms,
+        'metas': [[float(w[0]), float(w[1])] for w in waypoints],
+        'rango_o': analisis_control['rango_observabilidad'],
+        'rango_c': analisis_control['rango_controlabilidad'],
+        'configuracion': {
+            'Secuencia': secuencia_texto,
+            'Segmentos procesados': f'{st.session_state.indice_secuencia}/{len(st.session_state.secuencia_operacional)}',
+            'Cuadros guardados': len(cuadros),
+            'Cuadro del resumen': f'{frame_index + 1}/{len(cuadros)}',
+            'Estado y fase': f'{c.get("estado_operacional", ESTADO_LIBRE)} · {c.get("fase_operacional", "Sin trayectoria")}',
+            'Modo seleccionado actualmente': modo,
+            'Ganancias actuales Kp, Kd, Ki': f'{Kp:g}, {Kd:g}, {Ki:g}',
+            'Velocidad visual': f'{multiplicador_velocidad:g}x',
+            'Duración aproximada del video': f'{duracion_ms / 1000:.1f} s',
+            'Falla sensor / M2': f'{falla_sensor} / {falla_m2}',
+            'Control óptimo diagnóstico': control_optimo,
+            'Rangos Wo / Wc': f'{analisis_control["rango_observabilidad"]}/4 · {analisis_control["rango_controlabilidad"]}/4',
+            'Última meta IK': 'Incluida en el resumen' if waypoints else 'N/A (añade una meta)',
+            'K diagnóstica': ('Disponible; no aplicada al movimiento' if analisis_control['K'] is not None
+                              else 'Desactivada' if not control_optimo else 'No disponible: sistema no controlable'),
+        },
+    }
+    matrices = [
+        ('q', np.degrees(q), '°'), ('q̇', dq, 'rad/s'),
+        ('Posición FK [x,y]', [xs[2], ys[2]], 'mm'),
+    ]
+    if waypoints:
+        matrices.append(('Última meta IK', np.degrees(waypoints[-1][2:]), '°'))
+    matrices.extend([
+        ('Jacobiano J', J, 'mm/rad'), ('Inercia M', M, 'kg·m²'),
+        ('Coriolis C', coriolis, ''), ('Gravedad G', G, 'N·m'), ('Torque τ', tau, 'N·m'),
+        ('Discretización Φ', phi, ''), ('Discretización Γ', gamma, ''),
+        ('Observabilidad Wo', analisis_control['observabilidad'], ''),
+        ('Controlabilidad Wc', analisis_control['controlabilidad'], ''),
+    ])
+    if analisis_control['K'] is not None:
+        matrices.append(('Ganancia diagnóstica K', analisis_control['K'], ''))
+    st.caption(
+        f'El video reconstruye el brazo y su resumen durante aproximadamente {duracion_ms / 1000:.1f} s. '
+        'Se genera en este navegador; no se envían datos a ningún servicio externo.'
+    )
+    components.html(interfaz_grabacion(datos, informe_html(datos, matrices)), height=480, scrolling=True)
+
+
+if completo:
+    _dialogo_reporte_completo()
 
 # =====================================================================
 # FILA 1: ROBOT + RESUMEN MATEMÁTICO
 # =====================================================================
 with slot_slider:
-    if len(cuadros) > 1:
-        st.slider('Cuadro de la simulación', 0, len(cuadros) - 1, key='cuadro_sel')
+    st.slider(
+        'Cuadro de la simulación', 0, max(len(cuadros) - 1, 1),
+        key='cuadro_sel', disabled=len(cuadros) < 2,
+    )
+reproducir = (reproducir or st.session_state.pop('reproducir_pendiente', False)) and len(cuadros) > 1
+canal_reproduccion = f"sg90-resumen-{st.session_state.get('clic_n', 0)}"
+with slot_pausa:
+    components.html(f"""
+<style>
+body {{ margin: 0; text-align: center; }}
+button {{ width: 44px; height: 44px; border: 1px solid transparent; border-radius: 4px;
+  background: transparent; color: #f3f4f6; cursor: pointer; font-size: 18px; }}
+button:hover:enabled, button:focus-visible {{ background: #223048; border-color: #334155; }}
+button:disabled {{ opacity: .35; cursor: not-allowed; }}
+p {{ margin: 6px 0 0; color: #b6c2d4; font: 12px/1.2 sans-serif; }}
+</style>
+<button id="pausa" aria-label="Pausar animación" title="Pausar o reanudar la animación visual; no detiene un robot físico."
+  {'' if reproducir else 'disabled'}>⏸️</button>
+<p id="etiqueta_pausa">Pausa</p>
+<script>
+const canal = new BroadcastChannel({json.dumps(canal_reproduccion)});
+const boton = document.getElementById('pausa');
+boton.onclick = () => canal.postMessage({{type: 'toggle-pause'}});
+canal.onmessage = (evento) => {{
+  if (evento.data.type === 'paused') {{
+    boton.textContent = evento.data.value ? '▶️' : '⏸️';
+    boton.setAttribute('aria-label', evento.data.value ? 'Reanudar animación' : 'Pausar animación');
+    document.getElementById('etiqueta_pausa').textContent = evento.data.value ? 'Reanudar' : 'Pausa';
+  }}
+}};
+</script>
+""", height=65)
 cuadro_actual = min(st.session_state.cuadro_sel, max(len(cuadros) - 1, 0))
-if animar:
-    # Animación nativa: se envía una sola vez y el navegador reproduce los frames (sin reruns ni parpadeo)
-    with ui_grafica_robot:
-        components.html(html_animacion(cuadros, multiplicador_velocidad), height=640)
-else:
-    mostrar_plano(ui_grafica_robot, cuadro_actual)
 
 with slot_metricas:
-    if len(cuadros) > 1 and st.session_state.waypoints:
-        vel_final, sobreimpulso = metricas_estabilidad(cuadros, st.session_state.waypoints)
+    waypoints_metricas = waypoints_operacionales()
+    secuencia = st.session_state.secuencia_operacional
+    cuadros_metricas = cuadros
+    if len(secuencia) == 1 and secuencia[0]['tipo'] == ESTADO_SOLDADURA:
+        indice_inicio_pasada = next(
+            (i for i, cuadro in enumerate(cuadros) if cuadro.get('soldadura_activa')),
+            None,
+        )
+        if indice_inicio_pasada is not None:
+            cuadros_metricas = cuadros[indice_inicio_pasada:]
+    if len(secuencia) == 1 and len(cuadros_metricas) > 1 and waypoints_metricas:
+        vel_final, sobreimpulso = metricas_estabilidad(cuadros_metricas, waypoints_metricas)
         m_vel, m_sobre = st.columns(2)
         m_vel.metric('Velocidad angular final Σ|q̇|', f'{vel_final:.2f} rad/s')
         m_sobre.metric('Sobreimpulso máximo', f'{sobreimpulso:.1f} mm')
+    elif len(secuencia) > 1:
+        st.caption('Las métricas de estabilidad se muestran al ejecutar un solo segmento, para no mezclar estados.')
     if len(cuadros) > 1 and obstaculos_activos:
         golpes = contactos_obstaculos([c['q'] for c in cuadros], obstaculos_activos)
         m_col, m_pct = st.columns(2)
@@ -1144,30 +2372,87 @@ with slot_metricas:
         m_pct.metric('Tiempo en contacto', f'{100 * golpes.any(axis=1).mean():.0f} %')
 
 with slot_resumen:
-    xs, ys = fk(q[0], q[1])
-    J = calcular_jacobiano(q)
-    with st.container(border=True):
-        st.markdown('### Resumen Matemático')
-        st.markdown('**1. Estado Articular**')
-        st.latex(rf'q = \begin{{bmatrix}} {np.degrees(q[0]):.1f}^\circ \\ {np.degrees(q[1]):.1f}^\circ \end{{bmatrix}}')
+    if falla_sensor:
+        st.warning(
+            'Falla de Sensor activa: se asume que solo se miden q₁ y q₂. '
+            f'El rango de observabilidad es {analisis_control["rango_observabilidad"]}/4.'
+        )
+    if falla_m2:
+        st.error(
+            'Falla M2 (codo) activa: se anuló la segunda columna de B. '
+            f'El rango de controlabilidad es {analisis_control["rango_controlabilidad"]}/4.'
+        )
+    if control_optimo and analisis_control['K'] is None:
+        st.warning(
+            'No es posible asignar los cuatro polos mientras el sistema no sea completamente controlable.'
+        )
+    if reproducir and cuadros:
+        components.html(
+            html_animacion_resumen(cuadros, analisis_control),
+            height=640,
+            scrolling=True,
+        )
+    else:
+        with st.container(border=True):
+            st.markdown('### Resumen Matemático')
+            placeholders = {'operacion': st.empty(), 'error_cartesiano': st.empty()}
+            st.markdown('**1. Estado Articular**')
+            placeholders['q'] = st.empty()
 
-        st.markdown('**2. Cinemática Directa (FK)**')
-        st.latex(rf'x = {xs[2]:.1f}\,\text{{mm}}, \quad y = {ys[2]:.1f}\,\text{{mm}}')
+            st.markdown('**2. Cinemática Directa (FK)**')
+            placeholders['fk'] = st.empty()
 
-        st.markdown('**3. Cinemática Inversa (IK)**')
-        if st.session_state.waypoints:
-            t1_ik, t2_ik = st.session_state.waypoints[-1][2:]
-            st.latex(rf'\theta_1 = {np.degrees(t1_ik):.1f}^\circ, \quad \theta_2 = {np.degrees(t2_ik):.1f}^\circ')
-        else:
-            st.caption('N/A (añade un waypoint)')
+            st.markdown('**3. Cinemática Inversa (IK)**')
+            placeholders['ik'] = st.empty()
 
-        st.markdown('**4. Jacobiano J(q)** (mm/rad)')
-        st.latex(rf'J = \begin{{bmatrix}} {J[0, 0]:.1f} & {J[0, 1]:.1f} \\ {J[1, 0]:.1f} & {J[1, 1]:.1f} \end{{bmatrix}}')
+            st.markdown('**4. Jacobiano J(q)** (mm/rad)')
+            placeholders['jacobiano'] = st.empty()
 
-        st.markdown('**5. Modelo Dinámico**')
-        st.latex(r'\tau = M(q)\,\ddot{q} + C(q,\dot{q})\,\dot{q} + G(q)')
-        st.latex(rf'M = \begin{{bmatrix}} {M[0, 0] * 1e3:.3f} & {M[0, 1] * 1e3:.3f} \\ {M[1, 0] * 1e3:.3f} & {M[1, 1] * 1e3:.3f} \end{{bmatrix}}\times 10^{{-3}}\,\text{{kg·m}}^2, \quad '
-                 rf'G = \begin{{bmatrix}} {G[0] * 1e3:.1f} \\ {G[1] * 1e3:.1f} \end{{bmatrix}}\,\text{{mN·m}}')
+            st.markdown('**5. Modelo Dinámico**')
+            st.latex(r'\tau = M(q)\,\ddot{q} + C(q,\dot{q})\,\dot{q} + G(q)')
+            placeholders['inercia_gravedad'] = st.empty()
+
+            st.markdown('**6. Discretización del Sistema (ZOH)**')
+            st.caption(f'Estado x = [q₁, q₂, q̇₁, q̇₂]ᵀ · dt = {dt:.2f} s')
+            placeholders['phi'] = st.empty()
+            placeholders['gamma'] = st.empty()
+            placeholders['progreso'] = st.empty()
+
+            st.markdown('**7. Observabilidad**')
+            st.caption('Linealización en q₀ = [90°, 90°], q̇₀ = 0. Modelo virtual del brazo.')
+            placeholders['C'] = st.empty()
+            placeholders['observabilidad'] = st.empty()
+            placeholders['rango_observabilidad'] = st.empty()
+
+            st.markdown('**8. Controlabilidad**')
+            placeholders['B_efectiva'] = st.empty()
+            placeholders['controlabilidad'] = st.empty()
+            placeholders['rango_controlabilidad'] = st.empty()
+
+            st.markdown('**9. Control por asignación de polos (MIMO)**')
+            placeholders['ganancia'] = st.empty()
+            placeholders['ganancia_info'] = st.empty()
+
+            cuadro_actual_resumen = (
+                cuadros[frame_index] if cuadros else {'q': q, 'dq': dq}
+            )
+            actualizar_resumen_matematico(
+                cuadro_actual_resumen,
+                placeholders,
+                frame_index,
+                len(cuadros) if cuadros else 1,
+                analisis_control,
+            )
+
+if reproducir and cuadros:
+    with ui_grafica_robot:
+        components.html(
+            html_animacion_grafica(cuadros, multiplicador_velocidad),
+            height=640,
+            scrolling=False,
+        )
+else:
+    mostrar_plano(ui_grafica_robot, cuadro_actual)
 
 # =====================================================================
 # FILA 3: DIAGRAMA DE BLOQUES + POLOS Y CEROS
@@ -1193,6 +2478,7 @@ with fila3[1]:
 # EXPORTAR CÓDIGO PARA ROBOT FÍSICO
 # =====================================================================
 DIR_HW = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'assets', 'hardware_sg90')
+DIR_AYUDA_SG90 = os.path.join(os.path.dirname(DIR_HW), 'ayuda_sg90')
 
 
 def _leer_hw(nombre):
@@ -1213,37 +2499,768 @@ def _zip_paquete_hw():
     return buf.getvalue()
 
 
-with st.expander('Exportar Código para Robot Físico'):
-    st.markdown(
-        'Código validado para el brazo 2-DOF **L1 = L2 = 100 mm**, soft-limits **5°–170°**, '
-        'servos en **D9** (hombro) y **D10** (codo), rampa de **150°/s**, serial a **115200** baudios '
-        'con tramas `q1,q2\\n`. Controladores soportados: **Cinemático** y **PID + Feedforward**.'
-    )
+@st.dialog('Guía del robot SG90', width='large')
+def _mostrar_guia_robot(tema):
+    st.caption('Cierra con la ×, la tecla Esc o haciendo clic fuera del cuadro.')
     st.warning(
-        'Alimenta los servos SG90 con una **fuente externa de 5 V** (no desde el pin 5 V del Arduino) '
-        'y une su **GND con el GND del Arduino** (masa común). Deja el área despejada: al recibir el '
-        'primer paquete válido el brazo va a la pose inicial (90°, 90°).'
+        '**Fuente externa de 5 V y GND común.** No alimentes los servos desde el pin 5 V del Arduino. '
+        'Deja el área despejada: el primer paquete válido mueve el brazo a (90°, 90°).'
     )
-    c_ino, c_py, c_zip = st.columns(3)
-    with c_ino:
-        st.download_button('Firmware Arduino (.ino)', _leer_hw('brazo_sg90.ino'),
-                           file_name='brazo_sg90.ino', mime='text/plain', use_container_width=True)
-        st.caption('Ábrelo en Arduino IDE; debe estar en una carpeta llamada `brazo_sg90`.')
-    with c_py:
-        st.download_button('Script Python (.py)', _leer_hw('enviar_trayectoria_sg90.py'),
-                           file_name='enviar_trayectoria_sg90.py', mime='text/x-python', use_container_width=True)
-        st.caption('Valida R ≤ 200 mm y límites; envía por `pyserial` a 115200 baudios.')
-    with c_zip:
-        st.download_button('Paquete completo (.zip)', _zip_paquete_hw(),
-                           file_name='brazo_sg90_export.zip', mime='application/zip', use_container_width=True)
-        st.caption('Incluye las dependencias del script en la estructura de carpetas correcta.')
-    st.info(
-        'El script importa `entorno_entrenamiento_sg90.py` desde la carpeta superior, así que solo '
-        'funciona suelto si lo guardas en una subcarpeta junto a ese archivo: usa el **paquete .zip**. '
-        'Requiere `pip install numpy gymnasium pyserial`.'
-    )
-    st.code('cd brazo_sg90_export\\hardware\n'
+    if tema == 'codigo':
+        st.markdown('### Instalación y código')
+        st.caption('2 GDL · 100 + 100 mm · 5°–170° · D9 / D10 · 115200 baudios · 150°/s')
+        st.markdown(
+            '1. Descarga **Paquete** y descomprímelo para conservar la estructura de módulos.\n'
+            '2. Abre `hardware/brazo_sg90/brazo_sg90.ino` en Arduino IDE y cárgalo en la placa. '
+            'D9: hombro; D10: codo.\n'
+            '3. El script necesita `entorno_entrenamiento_sg90.py` en la carpeta superior '
+            'y `geometria_bloques_sg90.py` junto a ese módulo.\n'
+            '4. Instala las dependencias, identifica el puerto y calibra antes de enviar metas. '
+            'Sustituye `COM3` por tu puerto.'
+        )
+        st.code(
+            'python -m pip install numpy gymnasium pyserial\n'
+            'cd brazo_sg90_export\\hardware\n'
             'python enviar_trayectoria_sg90.py --listar-puertos\n'
             'python enviar_trayectoria_sg90.py --puerto COM3 --calibrar\n'
-            'python enviar_trayectoria_sg90.py --puerto COM3 --modo cinematico --meta 60,120 --meta 0,150 --meta -60,120',
-            language='bash')
+            'python enviar_trayectoria_sg90.py --puerto COM3 --modo cinematico --meta 60,120 --meta 0,150 --meta=-60,120',
+            language='powershell',
+        )
+        st.caption('Controladores: Cinemático y PID + Feedforward. Trama serial: q1,q2\\n.')
+    else:
+        st.markdown('### Envío desde esta página')
+        st.markdown(
+            '1. Ejecuta la página **en el PC conectado al Arduino por USB**. '
+            'La web publicada no puede acceder al USB de tu equipo.\n'
+            '2. Carga el firmware y prepara la alimentación según la guía de **Código del robot**.\n'
+            '3. Selecciona **Cinemático** en Análisis de Control para la primera prueba. '
+            'PID + Feedforward es más brusco (atraso simulado de ~31°).\n'
+            '4. Crea una secuencia solo de **posicionamientos**. Las pausas y pasadas A→X '
+            'no se envían al robot físico.\n'
+            '5. Selecciona el puerto, verifica la seguridad y confirma la casilla antes de pulsar **Enviar**.'
+        )
+        st.info('El puerto loop:// permite probar la comunicación sin Arduino; no mueve un robot físico.')
+        st.warning(
+            '**Detener** termina el proceso de envío, pero el robot mantiene la última orden: '
+            'no corta la alimentación ni es un paro de emergencia. La pausa de la animación tampoco detiene el robot.'
+        )
+        st.caption('Se parte de (90°, 90°) y se limita a 5°–170°. El ACK confirma comandos, no mide la posición física.')
+    if st.button('Cerrar guía', key='cerrar_guia_robot'):
+        st.rerun()
+
+
+@st.dialog('Asistencia del simulador SG90', width='large')
+def _mostrar_asistencia_simulador():
+    st.caption('Manual ilustrado · Cierra con la ×, Esc o haciendo clic fuera del cuadro.')
+    inicio, simulacion, control, resultados, robot, preguntas = st.tabs(
+        ['Inicio', 'Simulación y puntos', 'Control y análisis',
+         'Gráfica y reportes', 'Robot y seguridad', 'Preguntas frecuentes']
+    )
+    with inicio:
+        st.markdown('### Conoce el simulador')
+        st.image(
+            os.path.join(DIR_AYUDA_SG90, 'interfaz.svg'),
+            caption='Mapa ilustrativo de la interfaz, no una captura ni un resultado calculado.',
+            use_container_width=True,
+        )
+        st.markdown(
+            '**Primera prueba, sin conectar un robot:**\n\n'
+            '1. En **Análisis de Control**, selecciona **Cinemático**.\n'
+            '2. En **Simulación**, deja **Posicionamiento libre**, elige **Manual**, '
+            'introduce **X = 60 mm**, **Y = 120 mm** y pulsa **+**.\n'
+            '3. Pulsa **▶️ Ejecutar** para calcular y reproducir la trayectoria virtual.\n'
+            '4. Usa **Pausa**, revisa un cuadro con la línea de tiempo o descarga **📄 Reporte**.'
+        )
+        st.info('No necesitas Arduino para simular. Ejecutar y Pausa no envían órdenes al robot físico.')
+        st.caption(
+            f'Brazo de 2 GDL · eslabones {L1:g} + {L2:g} mm · '
+            f'metas articulares entre {Q_MIN_DEG:g}° y {Q_MAX_DEG:g}° · '
+            'posiciones en mm; modelo dinámico en SI.'
+        )
+        st.markdown(
+            '**Organización:** acciones arriba; gráfica y resumen debajo. '
+            '**Navegación** vuelve a Inicio. **Robot** permite abrir el SG90 de 2 GDL o el modelo genérico '
+            'de 2 GDL (brazo de 9 m). '
+            '**Código del robot** ofrece las descargas de hardware. '
+            'La flecha del borde inferior pliega el Ribbon; vuelve a pulsarla para recuperarlo.'
+        )
+    with simulacion:
+        st.markdown('### Construye y reproduce una secuencia')
+        st.image(
+            os.path.join(DIR_AYUDA_SG90, 'simulacion.svg'),
+            caption='Flujo conceptual de trabajo y diferencia entre pausa visual y reposo operacional.',
+            use_container_width=True,
+        )
+        st.markdown(
+            '| Acción | Qué hace |\n| --- | --- |\n'
+            '| ▶️ Ejecutar | Calcula/reanuda los segmentos pendientes; si terminaron, reproduce los cuadros existentes. |\n'
+            '| ⏸️ Pausa | Congela o reanuda únicamente la animación visual. |\n'
+            '| ⏹️ Limpiar | Borra toda la secuencia y reinicia el brazo virtual. |\n'
+            '| ↺ Reiniciar | Vuelve al estado inicial y vacía la trayectoria, conservando los segmentos. |\n'
+            '| Línea de tiempo | Selecciona un cuadro para verlo estático. No avanza en vivo durante la reproducción. |\n'
+            '| Velocidad | Cambia la velocidad de reproducción, no las ganancias ni el paso de integración. |'
+        )
+        st.markdown('#### Tipos de segmento')
+        st.markdown(
+            '- **Posicionamiento libre:** añade metas con **Clic** en la gráfica o con **Manual → X/Y → +**. '
+            'Se ejecutan en el orden de la tabla de secuencia.\n'
+            '- **Reposo:** inserta una espera operacional con **Añadir pausa**. '
+            'La secuencia conserva la pose hasta volver a pulsar Ejecutar.\n'
+            '- **Soldadura:** define **A** y **X** en coordenadas XY o ángulos q°. '
+            '**A→X** añade una aproximación a A y una pasada cartesiana recta hasta X. '
+            'Todo el tramo debe ser alcanzable, no solo sus extremos.'
+        )
+        st.warning('Soldadura es una trayectoria virtual: no activa una antorcha ni un arco físico.')
+        st.caption(
+            'Al reproducir desde un cuadro seleccionado se continúa desde él; '
+            'si seleccionaste el último, la reproducción comienza al inicio. '
+            'Los obstáculos no están disponibles en esta página SG90.'
+        )
+    with control:
+        st.markdown('### Elige el modo e interpreta el análisis')
+        st.markdown(
+            '| Modo | Uso en este simulador |\n| --- | --- |\n'
+            '| Cinemático | Sigue las referencias articulares sin integrar la dinámica; recomendado para explorar trayectorias. |\n'
+            '| PID | Permite comparar el efecto de la gravedad; con las ganancias iniciales no sostiene el brazo. |\n'
+            '| PID + Feedforward | Añade compensación de gravedad al PID e integra la dinámica. |\n'
+            '| Cinemático con RNA / RL (PPO) | No disponibles para este brazo SG90. |'
+        )
+        st.markdown(
+            '**Ganancias:** Kp actúa sobre el error, Kd amortigua la velocidad y Ki acumula el error. '
+            'Su efecto dinámico se estudia en PID o PID + Feedforward; aumentar una ganancia '
+            'no garantiza mejor seguimiento ni estabilidad.'
+        )
+        st.markdown('#### Observabilidad y controlabilidad')
+        st.markdown(
+            '- **W_o:** relaciona el estado del modelo linealizado con las salidas disponibles. '
+            'Un rango de **4/4** indica observabilidad completa de ese modelo.\n'
+            '- **W_c:** relaciona el estado con las entradas disponibles. '
+            'Un rango de **4/4** indica controlabilidad completa de ese modelo.\n'
+            '- Ambas se calculan alrededor de **q₀ = (90°, 90°)**, no de la pose del cuadro seleccionado.\n'
+            '- **Falla de Sensor** reduce las salidas consideradas a q₁ y q₂; '
+            '**Falla M2** anula la segunda columna de B en el diagnóstico.'
+        )
+        st.info(
+            'Las fallas y Control Óptimo son diagnósticos: no modifican la simulación ni el hardware. '
+            'Control Óptimo calcula K por asignación de polos MIMO; no es LQR y K no se aplica a los servos.'
+        )
+        st.markdown(
+            '**Planos S/Z:** aparecen en los modos dinámicos PID y PID + Feedforward. '
+            'La interfaz distingue el **Plano S (Lazo Cerrado)** del **Plano Z (Lazo Abierto)**. '
+            'Son análisis del modelo virtual, no una certificación de seguridad del robot real.'
+        )
+    with resultados:
+        st.markdown('### Lee la gráfica y guarda resultados')
+        st.markdown(
+            '**Control HMI:** abre el mando virtual desde Puntos. La cruceta y **Ir a coordenadas** '
+            'prueban poses; **Agregar punto** las guarda en la secuencia principal. Los pasos '
+            '**0.1 / 0.01 / 0.001** equivalen a **10 / 1 / 0.1 mm**. En Soldadura agrega A y luego X; '
+            'Reposo inserta una pausa. La conexión en curvas solo afecta a los nuevos posicionamientos HMI, '
+            'nunca a la pasada de soldadura. Puedes cerrar haciendo clic fuera: los segmentos se conservan. '
+            'Los recorridos HMI son virtuales y no se envían al puerto físico. '
+            '**Movimiento en vivo · USB local** permite enviar solo la cruceta e Ir en modo Cinemático, '
+            'tras elegir puerto y confirmar el arranque a (90°, 90°). Requiere el firmware de dos servos '
+            'D9/D10, no el de 4 GDL. Cerrar el modal desconecta el puerto, no corta la alimentación.'
+        )
+        st.markdown(
+            '**Gráfica Plotly:** muestra el brazo y las metas. En modo Clic, selecciona un punto '
+            'del plano para añadir una meta. Sus herramientas permiten zoom, desplazamiento, '
+            'restablecer ejes y descargar una imagen PNG.\n\n'
+            '**Resumen matemático:** acompaña el cuadro mostrado con estado articular, '
+            'cinemática directa/inversa, Jacobiano, dinámica y discretización. '
+            'También incluye W_o, W_c y, cuando es posible, la ganancia diagnóstica K.'
+        )
+        st.markdown(
+            '**No mezcles estas magnitudes:**\n\n'
+            '- q y q̇ describen el estado simulado; q deseada es la referencia.\n'
+            '- FK obtiene la posición desde los ángulos; IK busca los ángulos para una meta.\n'
+            '- El Jacobiano relaciona velocidades articulares y cartesianas.\n'
+            '- Los valores mostrados no son mediciones de sensores físicos.'
+        )
+        st.markdown('#### Exportar')
+        st.markdown(
+            '**📄 TXT** descarga W_o, W_c, sus rangos y las condiciones de análisis seleccionadas. '
+            '**🎥 HTML** requiere una simulación calculada y genera un informe autocontenido con '
+            'video del brazo y resumen, matrices y configuración. La grabación ocurre en el navegador; '
+            'mantén la pestaña activa hasta que termine. Ninguno contiene telemetría real.\n\n'
+            'Las métricas de velocidad angular final y sobreimpulso se muestran al ejecutar '
+            'un solo segmento; con una secuencia compuesta se evita mezclar estados.'
+        )
+    with robot:
+        st.markdown('### Simular no es mover el robot físico')
+        st.image(
+            os.path.join(DIR_AYUDA_SG90, 'seguridad.svg'),
+            caption='Rutas independientes: la animación no controla el puerto serial.',
+            use_container_width=True,
+        )
+        st.warning(
+            '**Fuente externa de 5 V y GND común.** No alimentes los servos desde el pin 5 V del Arduino. '
+            'Mantén el área despejada: el primer paquete válido mueve el brazo a (90°, 90°).'
+        )
+        st.markdown(
+            '- **Código del robot:** firmware Arduino, script Python y paquete ZIP. '
+            'Su botón Guía explica instalación y comandos.\n'
+            '- **Enviar al robot físico (local):** solo desde el PC conectado al Arduino por USB; '
+            'la web publicada no accede al USB de tu equipo.\n'
+            '- Se requiere un modo compatible, al menos un punto y la confirmación de seguridad. '
+            'Las pausas y pasadas A→X bloquean el envío; solo se admiten posicionamientos.\n'
+            '- **loop://** sirve para probar sin Arduino. No implica una prueba física.\n'
+            '- **Detener** termina el proceso serial, pero mantiene la última orden; '
+            'no corta la alimentación ni es un paro de emergencia.\n'
+            '- El ACK confirma comandos recibidos; no demuestra la posición física del servo.'
+        )
+        st.info(
+            'El hardware no se da por validado físicamente. Para consultar las guías de conexión o código, '
+            'cierra este manual y abre Guía en la pestaña correspondiente.'
+        )
+    with preguntas:
+        st.markdown('### Resuelve dudas habituales')
+        with st.expander('Ejecutar está deshabilitado'):
+            st.write('Añade al menos un segmento. Sin segmentos pendientes ni cuadros calculados no hay nada que reproducir.')
+        with st.expander('El punto o la pasada A→X no se acepta'):
+            st.write(
+                f'Las metas deben ser alcanzables con eslabones de {L1:g} y {L2:g} mm, '
+                f'ángulos entre {Q_MIN_DEG:g}° y {Q_MAX_DEG:g}° y la rama de codo permitida. '
+                'Estar dentro del círculo de alcance no basta. En A→X se comprueban también los puntos intermedios.'
+            )
+        with st.expander('La barra superior desapareció o faltan opciones'):
+            st.write(
+                'Pulsa la flecha hacia abajo entre las líneas superiores para abrir el Ribbon. '
+                'Si un panel tiene más contenido, desplázate dentro de él; el resto de la página tiene su propio scroll.'
+            )
+        with st.expander('La falla cambia las matrices, pero el brazo sigue igual'):
+            st.write('Es intencional: los interruptores solo cambian el análisis diagnóstico, no la física ni la trayectoria.')
+        with st.expander('No aparece el Arduino o no puedo enviar'):
+            st.write(
+                'Comprueba que ejecutas la web localmente en el PC conectado por USB y que pyserial está instalado. '
+                'Si conectas la placa con la página abierta, vuelve a ejecutar la página para actualizar los puertos. '
+                'Revisa también el modo, los puntos, la compatibilidad de la secuencia y la casilla de seguridad.'
+            )
+        with st.expander('RNA, RL o los obstáculos no funcionan aquí'):
+            st.write(
+                'No están disponibles en esta página SG90. Las opciones de RNA/RL proceden del proyecto '
+                'del brazo de 9 m y no se pueden reutilizar directamente en este modelo.'
+            )
+    if st.button('Cerrar asistencia', key='cerrar_asistencia_simulador'):
+        st.rerun()
+
+
+with tab_asistencia:
+    with st.container(width=180, key='asistencia_simulador_ribbon'):
+        if st.button('ⓘ', key='guia_simulador', help='Abrir el manual ilustrado del simulador: uso, análisis, reportes y seguridad.'):
+            _mostrar_asistencia_simulador()
+        st.caption('Guía del simulador')
+
+
+with tab_codigo:
+    with st.container(key='codigo_robot_ribbon'):
+        descargas, asistencia, instrucciones = st.columns([1.4, 0.6, 3])
+        with descargas:
+            c_ino, c_py, c_zip = st.columns(3)
+            with c_ino:
+                st.download_button('⚙', _leer_hw('brazo_sg90.ino'),
+                                   file_name='brazo_sg90.ino', mime='text/plain', use_container_width=False,
+                                   help='Descargar firmware .ino. Abrir en Arduino IDE dentro de una carpeta llamada brazo_sg90.')
+                st.caption('Arduino')
+            with c_py:
+                st.download_button('🐍', _leer_hw('enviar_trayectoria_sg90.py'),
+                                   file_name='enviar_trayectoria_sg90.py', mime='text/x-python', use_container_width=False,
+                                   help='Descargar script Python de envío serial a 115200 baudios. Necesita los módulos del paquete ZIP.')
+                st.caption('Python')
+            with c_zip:
+                st.download_button('📦', _zip_paquete_hw(),
+                                   file_name='brazo_sg90_export.zip', mime='application/zip', use_container_width=False,
+                                   help='Descargar firmware y módulos Python en la estructura de carpetas necesaria.')
+                st.caption('Paquete')
+            st.caption('Descargas')
+        with asistencia:
+            with st.container():
+                if st.button('ⓘ', key='guia_codigo', help='Abrir la guía de instalación, cableado y uso del código.'):
+                    _mostrar_guia_robot('codigo')
+                st.caption('Guía')
+            st.caption('Asistencia')
+        with instrucciones:
+            st.warning(
+                '**Fuente externa de 5 V y GND común.** No alimentes los servos desde el pin 5 V del Arduino. '
+                'Deja el área despejada: el primer paquete válido mueve el brazo a (90°, 90°).'
+            )
+            st.caption('Seguridad')
+
+# =====================================================================
+# ENVIAR AL ROBOT FÍSICO (solo local)
+# =====================================================================
+MODO_A_CLI = {'Cinemático': 'cinematico', 'PID + Feedforward': 'pid_ff'}
+OPCION_LOOP = 'loop:// (prueba sin Arduino)'
+LOG_ROBOT = os.path.join(tempfile.gettempdir(), 'brazo_sg90_envio.log')
+
+
+def _hay_pyserial():
+    return importlib.util.find_spec('serial') is not None
+
+
+def _puertos_serie():
+    if not _hay_pyserial():
+        return []
+    from serial.tools import list_ports
+    return [p.device for p in list_ports.comports()]
+
+
+def _robot_activo():
+    proc = st.session_state.get('robot_proc')
+    return proc is not None and proc.poll() is None
+
+
+def _detener_robot():
+    proc = st.session_state.get('robot_proc')
+    if proc is not None and proc.poll() is None:
+        proc.terminate()   # el brazo se queda en la última posición recibida
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+def _hmi_es_local():
+    # La instancia pública no debe habilitar hardware por el contexto del navegador.
+    loopback = ('localhost', '127.0.0.1', '::1')
+    return (
+        st.get_option('server.address') in loopback
+        and st.context.ip_address in (None, '127.0.0.1', '::1')
+        and urlparse(st.context.url or '').hostname in loopback
+    )
+
+
+def _enviar_robot(puerto, modo_cli, waypoints):
+    if puerto != 'loop://' and not _hmi_es_local():
+        raise RuntimeError('El USB físico requiere iniciar Streamlit con --server.address localhost.')
+    if st.session_state.get('hmi_enlace_vivo') is not None:
+        raise RuntimeError('Desconecta primero el movimiento en vivo del HMI.')
+    script = os.path.join(DIR_HW, 'enviar_trayectoria_sg90.py')
+    # El script busca entorno_entrenamiento_sg90.py en la carpeta superior; aquí está junto a él.
+    env = dict(os.environ, PYTHONPATH=DIR_HW, PYTHONIOENCODING='utf-8')
+    # --meta=x,y con '=': un x negativo se confundiría con una opción
+    cmd = [sys.executable, '-u', script, '--puerto', puerto, '--modo', modo_cli, '--si'] + \
+          [f'--meta={w[0]:.1f},{w[1]:.1f}' for w in waypoints]
+    with open(LOG_ROBOT, 'w', encoding='utf-8') as f:
+        f.write('$ ' + ' '.join(cmd[2:]) + '\n')
+    log = open(LOG_ROBOT, 'a', encoding='utf-8')
+    flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+    st.session_state.robot_proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=env,
+                                                   creationflags=flags)
+    log.close()
+
+
+def _estado_robot():
+    proc = st.session_state.get('robot_proc')
+    if proc is None:
+        return
+    if proc.poll() is None:
+        st.info('🟢 Enviando trayectoria al robot…')
+    elif proc.returncode == 0:
+        st.success('Envío terminado.')
+    elif proc.returncode in (1, 15, -15) or proc.returncode > 1000:
+        st.warning(f'Envío detenido (código {proc.returncode}). El brazo se queda en la última posición recibida.')
+    else:
+        st.error(f'El envío falló (código {proc.returncode}). Revisa el registro.')
+    if os.path.exists(LOG_ROBOT):
+        with open(LOG_ROBOT, encoding='utf-8', errors='replace') as f:
+            st.code(''.join(f.readlines()[-12:]) or '(sin salida aún)', language='text')
+
+
+with tab_robot:
+    with st.container(key='robot_fisico_ribbon', width=1100):
+        conexion, estado, acciones = st.columns([2, 2, 1.4])
+        with conexion:
+            slot_puerto = st.empty()
+            st.caption('Conexión')
+        with acciones:
+            with st.container(key='acciones_envio'):
+                b_env, b_stop, b_guia = st.columns(3)
+                with b_guia:
+                    if st.button('ⓘ', key='guia_envio', help='Abrir los pasos de conexión, envío y detención del robot local.'):
+                        _mostrar_guia_robot('envio')
+                    st.caption('Guía')
+            st.caption('Acciones')
+        with estado:
+            st.caption(f'CONTROL · {modo}')
+            st.caption(f'{len(st.session_state.waypoints)} puntos · Inicio (90°, 90°) · Límites 5°–170°')
+            st.caption('Estado')
+        st.caption('USB local: ejecuta esta página en el PC conectado al Arduino; no funciona desde la web publicada.')
+        secuencia_compatible_robot = all(
+            segmento['tipo'] == ESTADO_LIBRE and 'conexion_hmi' not in segmento
+            for segmento in st.session_state.secuencia_operacional
+        )
+        if not secuencia_compatible_robot:
+            st.warning(
+                'La secuencia contiene una pausa, una pasada A→X o un recorrido virtual HMI. '
+                'No se envía al hardware para evitar omitir esos estados o cambiar la trayectoria; '
+                'crea una secuencia solo de posicionamientos del editor principal para usar el robot físico.'
+            )
+        elif not _hay_pyserial():
+            st.error('Falta `pyserial` en el Python que ejecuta esta página. Instálalo con:\n\n'
+                     f'`"{sys.executable}" -m pip install pyserial`')
+        else:
+            puertos = _puertos_serie() if _hmi_es_local() else []
+            sel = slot_puerto.selectbox('Puerto serie', puertos + [OPCION_LOOP])
+            puerto = 'loop://' if sel == OPCION_LOOP else sel
+            if not _hmi_es_local():
+                st.caption('Solo eco virtual. Para habilitar el USB físico inicia Streamlit con --server.address localhost.')
+            elif not puertos:
+                st.caption('No se detectó ningún puerto. Conecta el Arduino, o usa loop:// para probar sin placa.')
+
+            wps_robot = list(st.session_state.waypoints)
+            modo_cli = MODO_A_CLI.get(modo)
+            if modo_cli is None:
+                st.warning('Para el robot elige "Cinemático" (recomendado) o "PID + Feedforward" en el modo de control.')
+            elif modo == 'PID + Feedforward':
+                st.warning('PID + Feedforward es más brusco que el cinemático (atraso simulado de ~31°). '
+                           'Para la primera prueba usa Cinemático.')
+            confirmado = st.checkbox('Área despejada y fuente externa de 5 V con GND común conectada: '
+                                     'el brazo saltará a (90°, 90°) y se moverá.')
+            activo = _robot_activo()
+            enviar = b_env.button('📤', use_container_width=False, type='primary',
+                                  help='Enviar los posicionamientos al robot físico. Requiere confirmar alimentación y área despejada.',
+                                  disabled=(
+                                      activo or not confirmado or modo_cli is None or not wps_robot
+                                      or not secuencia_compatible_robot
+                                      or st.session_state.get('hmi_enlace_vivo') is not None
+                                  ))
+            b_env.caption('Enviar')
+            detener = b_stop.button('■', use_container_width=False, disabled=not activo,
+                                    help='Detener el proceso de envío serial. El robot mantiene la última orden; no corta su alimentación.')
+            b_stop.caption('Detener')
+            if enviar:
+                _enviar_robot(puerto, modo_cli, wps_robot)
+                st.rerun()
+            if detener:
+                _detener_robot()
+                st.rerun()
+            if activo:
+                st.fragment(run_every=1)(_estado_robot)()
+            else:
+                _estado_robot()
+
+
+def _hmi_condiciones_vivo(puerto):
+    if _robot_activo():
+        return 'Hay un envio serial de trayectoria activo. Detenlo antes de usar el HMI en vivo.'
+    if modo != 'Cinemático':
+        return 'Selecciona el controlador Cinemático para el movimiento manual en vivo.'
+    if st.session_state.hmi_tipo != ESTADO_LIBRE or any(
+        s['tipo'] != ESTADO_LIBRE for s in st.session_state.secuencia_operacional
+    ):
+        return 'En vivo solo admite Posicionamiento libre y secuencias sin Reposo ni Soldadura.'
+    if puerto != 'loop://' and not _hmi_es_local():
+        return 'El puerto fisico solo se habilita desde localhost en el PC conectado al Arduino.'
+    return None
+
+
+def _hmi_desconectar_vivo():
+    enlace = st.session_state.pop('hmi_enlace_vivo', None)
+    st.session_state.hmi_confirmar_vivo = False
+    if enlace is not None:
+        try:
+            enlace.cerrar()
+        except RuntimeError as exc:
+            logging.getLogger(__name__).exception('Fallo al cerrar el HMI en vivo')
+            st.session_state.hmi_aviso = ('error', str(exc))
+        else:
+            st.session_state.hmi_aviso = (
+                'info', 'En vivo desconectado. No es un paro electrico; el Arduino puede mantener la ultima orden o reiniciarse.',
+            )
+
+
+def _hmi_activar_vivo():
+    puerto = st.session_state.hmi_puerto_vivo
+    puerto = 'loop://' if puerto == OPCION_LOOP else puerto
+    error = _hmi_condiciones_vivo(puerto)
+    if error or not st.session_state.get('hmi_confirmar_vivo'):
+        st.session_state.hmi_aviso = ('error', error or 'Confirma primero alimentacion, calibracion y area despejada.')
+        return
+    if st.session_state.get('hmi_enlace_vivo') is not None:
+        st.session_state.hmi_aviso = ('warning', 'El enlace en vivo ya esta activo.')
+        return
+    enlace = None
+    try:
+        enlace = ControlVivoSG90(puerto)
+        grados = enlace.enviar(Q_INICIAL)
+    except (RuntimeError, ValueError) as exc:
+        if enlace is not None:
+            try:
+                enlace.cerrar()
+            except RuntimeError:
+                logging.getLogger(__name__).exception('Fallo al cerrar una activacion HMI incompleta')
+        logging.getLogger(__name__).exception('No se pudo activar el HMI en vivo')
+        st.session_state.hmi_confirmar_vivo = False
+        st.session_state.hmi_aviso = ('error', str(exc))
+        return
+    st.session_state.hmi_enlace_vivo = enlace
+    st.session_state.hmi_q = Q_INICIAL.copy()
+    xs, ys = fk(*Q_INICIAL)
+    st.session_state.hmi_x, st.session_state.hmi_y = float(xs[-1]), float(ys[-1])
+    st.session_state.hmi_animar = False
+    etiqueta = 'ECO loop://, sin motores' if enlace.simulado else 'ACK del firmware, no posicion medida'
+    st.session_state.hmi_aviso = ('info', f'En vivo activo: inicio {grados}. {etiqueta}.')
+
+
+def _hmi_panel_vivo():
+    enlace = st.session_state.get('hmi_enlace_vivo')
+    if enlace is not None and (not enlace.activo or _hmi_condiciones_vivo(enlace.puerto)):
+        error = _hmi_condiciones_vivo(enlace.puerto) or 'Se perdio la conexion serial.'
+        _hmi_desconectar_vivo()
+        st.session_state.hmi_aviso = ('error', error)
+        enlace = None
+    activo = enlace is not None
+    with st.expander('Movimiento en vivo · USB local', expanded=activo):
+        st.caption('Solo 2 servos: hombro D9 y codo D10, firmware brazo_sg90.ino. '
+                   'Cruceta e Ir envian metas; no reproducen curvas ni secuencias.')
+        puertos = _puertos_serie() if _hmi_es_local() else []
+        st.selectbox('Puerto HMI', [OPCION_LOOP] + puertos, key='hmi_puerto_vivo', disabled=activo)
+        st.checkbox('Calibracion verificada, area despejada y fuente externa 5 V con GND comun. '
+                    'Al activar el brazo SALTA a (90°, 90°).',
+                    key='hmi_confirmar_vivo', disabled=activo)
+        if not _hmi_es_local():
+            st.caption('Solo prueba loop://. Para USB físico inicia Streamlit con --server.address localhost.')
+        activar, detener = st.columns(2)
+        seleccion = st.session_state.hmi_puerto_vivo
+        puerto = 'loop://' if seleccion == OPCION_LOOP else seleccion
+        activar.button('Activar en vivo', key='hmi_activar_vivo', on_click=_hmi_activar_vivo,
+                       disabled=activo or not st.session_state.hmi_confirmar_vivo
+                       or not _hay_pyserial() or _hmi_condiciones_vivo(puerto) is not None)
+        detener.button('Desconectar', key='hmi_desconectar_vivo', on_click=_hmi_desconectar_vivo,
+                       disabled=not activo)
+        if not _hay_pyserial():
+            st.error('Falta pyserial en el Python de la aplicacion.')
+        condicion = _hmi_condiciones_vivo(puerto)
+        if condicion:
+            st.caption(condicion)
+        st.caption('Sin sensor de posicion. Resolucion serial: 1°. Desconectar no corta alimentacion; '
+                   'cerrar el modal cierra el puerto. No es control continuo de tiempo real ni parada de emergencia.')
+        if activo:
+            st.info('EN VIVO · ' + ('ECO local, sin robot' if enlace.simulado else enlace.puerto))
+    return activo
+
+
+def _hmi_mover(x, y):
+    q_nuevo = ik(x, y)
+    if q_nuevo[0] is None:
+        st.session_state.hmi_aviso = ('warning', 'Movimiento rechazado: punto fuera de la zona permitida.')
+        return False
+    enlace = st.session_state.get('hmi_enlace_vivo')
+    if enlace is not None:
+        try:
+            condicion = _hmi_condiciones_vivo(enlace.puerto)
+            if condicion:
+                raise RuntimeError(condicion)
+            grados = enlace.enviar(q_nuevo)
+        except (RuntimeError, ValueError) as exc:
+            _hmi_desconectar_vivo()
+            logging.getLogger(__name__).exception('Fallo durante el movimiento HMI en vivo')
+            st.session_state.hmi_aviso = ('error', str(exc))
+            return False
+    st.session_state.hmi_q = np.asarray(q_nuevo)
+    st.session_state.hmi_x, st.session_state.hmi_y = float(x), float(y)
+    st.session_state.hmi_aviso = (
+        ('info', f'Consigna {grados} enviada. ' + ('Eco local; sin robot.' if enlace.simulado else 'ACK no es posicion medida.'))
+        if enlace is not None else
+        ('info', 'Pose de prueba actualizada. Pulsa Agregar punto para guardarla.')
+    )
+    return True
+
+
+def _hmi_jog(eje, incremento):
+    xs_jog, ys_jog = fk(*st.session_state.hmi_q)
+    destino = [xs_jog[-1], ys_jog[-1]]
+    destino[eje] += incremento
+    _hmi_mover(*destino)
+
+
+def _hmi_agregar(x=None, y=None):
+    if st.session_state.get('hmi_enlace_vivo') is not None:
+        st.session_state.hmi_aviso = ('warning', 'Desconecta En vivo antes de editar o reproducir la secuencia.')
+        return
+    tipo = st.session_state.hmi_tipo
+    if tipo == ESTADO_REPOSO:
+        agregar_pausa()
+        st.session_state.hmi_aviso = ('success', 'Reposo añadido a la secuencia.')
+        return
+    x = st.session_state.hmi_x if x is None else float(x)
+    y = st.session_state.hmi_y if y is None else float(y)
+    if not _hmi_mover(x, y):
+        return
+    if tipo == ESTADO_LIBRE:
+        agregar_waypoint(x, y)
+        st.session_state.secuencia_operacional[-1]['conexion_hmi'] = (
+            'curvas' if st.session_state.hmi_curvas else 'rectas'
+        )
+        st.session_state.hmi_aviso = ('success', 'Punto añadido. El recorrido se valida al ejecutar.')
+    elif st.session_state.get('hmi_a') is None:
+        st.session_state.hmi_a = (x, y)
+        st.session_state.hmi_aviso = ('info', 'Inicio A preparado. Selecciona el final X y vuelve a agregar.')
+    else:
+        inicio = st.session_state.hmi_a
+        error = ('A y X deben ser diferentes.' if np.allclose(inicio, (x, y))
+                 else agregar_soldadura(inicio, (x, y)))
+        if error:
+            st.session_state.hmi_aviso = ('error', error)
+        else:
+            st.session_state.hmi_a = None
+            st.session_state.hmi_aviso = ('success', 'Tramo de soldadura A→X añadido.')
+
+
+def _hmi_cambiar_tipo():
+    _hmi_desconectar_vivo()
+    st.session_state.hmi_tipo_pendiente = st.session_state.hmi_tipo
+    st.session_state.hmi_a = None
+
+
+def _hmi_cambiar_clic():
+    st.session_state.hmi_clic_pendiente = st.session_state.hmi_clic
+
+
+def _hmi_seleccionar(clave, plano):
+    puntos = st.session_state[clave]['selection']['points']
+    puntos = [p for p in puntos if p.get('curve_number') == plano]
+    if puntos:
+        _hmi_agregar(puntos[0]['x'], puntos[0]['y'])
+        st.session_state.hmi_clic_n += 1
+
+
+def _hmi_figura():
+    fig = figura_plotly(cuadro_actual, st.session_state.hmi_clic, q_vista=st.session_state.hmi_q)
+    plano = len(fig.data) - 1
+    q_previo = st.session_state.estado['q']
+    pendientes = st.session_state.secuencia_operacional[st.session_state.indice_secuencia:]
+    indice = 0
+    while indice < len(pendientes):
+        segmento = pendientes[indice]
+        conexion = segmento.get('conexion_hmi')
+        if conexion:
+            puntos = []
+            while indice < len(pendientes) and pendientes[indice].get('conexion_hmi') == conexion:
+                puntos.append(pendientes[indice]['waypoint'][:2])
+                indice += 1
+            try:
+                plan = planificar_recorrido(q_previo, puntos, fk, ik, PASOS_POR_TRAMO, curvas=conexion == 'curvas')
+            except ValueError as exc:
+                st.session_state.hmi_aviso = ('warning', str(exc))
+                q_previo = np.asarray(ik(*puntos[-1]))
+                continue
+            ruta = ruta_efector([q_previo, *plan])
+            fig.add_scatter(x=ruta[:, 0], y=ruta[:, 1], mode='lines', name=f'HMI · {conexion}',
+                            line=dict(color=COLOR_ACENTO, width=2, dash='dot'), hoverinfo='skip')
+            q_previo = plan[-1]
+        else:
+            if segmento['tipo'] != ESTADO_REPOSO:
+                q_previo = np.asarray(
+                    segmento['waypoint'][2:] if segmento['tipo'] == ESTADO_LIBRE else segmento['waypoints'][-1][2:]
+                )
+            indice += 1
+    if st.session_state.get('hmi_a') is not None:
+        x_a, y_a = st.session_state.hmi_a
+        fig.add_scatter(x=[x_a], y=[y_a], mode='markers+text', text=['A'], textposition='top right',
+                        name='Inicio preparado', marker=dict(color=COLOR_IDEAL, size=12))
+    fig.update_layout(title=None, height=490, margin=dict(l=5, r=5, t=10, b=5),
+                      legend=dict(orientation='h', y=-0.12, x=0, xanchor='left'))
+    return fig, plano
+
+
+@st.dialog('Control HMI · Brazo SG90', width='large', dismissible=True, on_dismiss=_hmi_desconectar_vivo)
+def _mostrar_teach_pendant():
+    st.markdown("""
+    <style>
+    div[role="dialog"]:has(.st-key-teach_pendant_sg90) {width:min(1200px,96vw);max-width:1200px;background:#0f172a;color:#f8fafc;}
+    .st-key-teach_pendant_sg90 [data-testid="stVerticalBlock"] {gap:.4rem;}
+    .st-key-teach_pendant_sg90 button {border-radius:5px;min-height:2.5rem;}
+    .st-key-teach_pendant_sg90 .st-key-hmi_cruceta button {background:#223048;border-color:#475569;font-weight:700;}
+    </style>
+    """, unsafe_allow_html=True)
+    with st.container(key='teach_pendant_sg90'):
+        st.caption('MANDO SG90 · Virtual por defecto. En vivo envia consignas, no mide la posicion real.')
+        vivo = st.session_state.get('hmi_enlace_vivo') is not None
+        visor, mandos = st.columns([0.55, 0.45], gap='medium')
+        with visor:
+            if st.session_state.pop('hmi_animar', False) and len(cuadros) > 1:
+                fig, _ = figura_animacion(cuadros)
+                fig.update_layout(title=None, height=490, margin=dict(l=5, r=5, t=10, b=5))
+                components.html(fig.to_html(
+                    include_plotlyjs='cdn', auto_play=True, config=dict(responsive=True, displaylogo=False),
+                    animation_opts=dict(frame=dict(duration=40 / multiplicador_velocidad, redraw=False),
+                                        transition=dict(duration=0), mode='immediate'),
+                ), height=510)
+                st.caption('Reproducción virtual. Usa cualquier mando para volver a la edición.')
+            else:
+                fig, plano = _hmi_figura()
+                clave = f'hmi_plano_{st.session_state.hmi_clic_n}'
+                st.plotly_chart(
+                    fig, key=clave, use_container_width=True, selection_mode='points',
+                    on_select=(lambda: _hmi_seleccionar(clave, plano)) if st.session_state.hmi_clic
+                    and st.session_state.hmi_tipo != ESTADO_REPOSO and not vivo else 'ignore',
+                )
+            st.caption(f'{len(st.session_state.secuencia_operacional)} segmentos · '
+                       f'{st.session_state.indice_secuencia} procesados')
+        with mandos:
+            vivo = _hmi_panel_vivo()
+            with st.container(border=True):
+                factor = st.radio('Paso / Velocidad', (0.1, 0.01, 0.001), horizontal=True,
+                                  format_func=lambda valor: f'{valor:g}', key='hmi_paso')
+                paso = 100 * factor
+                st.caption(f'Avance por pulsación: {paso:g} mm')
+                with st.container(key='hmi_cruceta'):
+                    for fila in ((None, 'Y+', None), ('X-', None, 'X+'), (None, 'Y-', None)):
+                        for celda, direccion in zip(st.columns(3), fila):
+                            if direccion:
+                                eje, signo = {'X-': (0, -1), 'X+': (0, 1), 'Y-': (1, -1), 'Y+': (1, 1)}[direccion]
+                                celda.button(direccion, key=f'hmi_jog_{direccion}', on_click=_hmi_jog,
+                                             args=(eje, signo * paso), use_container_width=True)
+                st.toggle('Conectar en curvas', key='hmi_curvas',
+                          disabled=vivo,
+                          help='Nuevos posicionamientos HMI: curva suave o rectas cartesianas. Soldadura siempre recta.')
+                st.radio('Estado operacional', TIPOS_SEGMENTO, key='hmi_tipo', horizontal=True,
+                         disabled=vivo,
+                         on_change=_hmi_cambiar_tipo)
+            with st.container(border=True):
+                st.toggle('Modo Clic', key='hmi_clic', on_change=_hmi_cambiar_clic,
+                          disabled=vivo,
+                          help='Cada clic en la zona permitida agrega un punto; en Soldadura selecciona A y después X.')
+                entradas = st.columns(2)
+                for columna, eje in zip(entradas, ('x', 'y')):
+                    columna.number_input(f'{eje.upper()} (mm)', -200.0, 200.0, step=0.1, format='%.2f', key=f'hmi_{eje}')
+                st.button('Ir a coordenadas', key='hmi_ir', on_click=_hmi_mover,
+                          args=(st.session_state.hmi_x, st.session_state.hmi_y), use_container_width=True)
+                botones = st.columns(3)
+                etiqueta = ('Agregar A' if st.session_state.get('hmi_a') is None else 'Agregar X'
+                            ) if st.session_state.hmi_tipo == ESTADO_SOLDADURA else 'Agregar punto'
+                botones[0].button(etiqueta, key='hmi_agregar', on_click=_hmi_agregar, use_container_width=True,
+                                  disabled=vivo)
+                pendientes = st.session_state.indice_secuencia < len(st.session_state.secuencia_operacional)
+                for columna, accion in zip(botones[1:], ('ejecutar', 'limpiar')):
+                    if columna.button(accion.capitalize(), key=f'hmi_{accion}', use_container_width=True,
+                                      disabled=vivo or ((not pendientes and len(cuadros) < 2) if accion == 'ejecutar'
+                                      else not st.session_state.secuencia_operacional)):
+                        st.session_state.hmi_accion = accion
+                        st.session_state.hmi_aviso = None
+                        st.rerun(scope='app')
+            aviso = st.session_state.get('hmi_aviso')
+            if aviso:
+                getattr(st, aviso[0])(aviso[1])
+
+
+if boton_hmi or abrir_hmi:
+    if boton_hmi:
+        _hmi_desconectar_vivo()
+    if boton_hmi or 'hmi_q' not in st.session_state:
+        st.session_state.hmi_q = np.asarray(
+            cuadros[cuadro_actual]['q'] if cuadros else st.session_state.estado['q']
+        ).copy()
+        xs_hmi, ys_hmi = fk(*st.session_state.hmi_q)
+        st.session_state.hmi_x, st.session_state.hmi_y = float(xs_hmi[-1]), float(ys_hmi[-1])
+        if st.session_state.get('hmi_tipo') != st.session_state.tipo_segmento:
+            st.session_state.hmi_a = None
+        st.session_state.hmi_tipo = st.session_state.tipo_segmento
+        st.session_state.hmi_clic = st.session_state.get('modo_interaccion_secuencia', MODO_CLIC) == MODO_CLIC
+    st.session_state.setdefault('hmi_curvas', False)
+    st.session_state.setdefault('hmi_clic_n', 0)
+    if solicitud_hmi == 'ejecutar' and not ejecutar:
+        st.session_state.hmi_animar = True
+    _mostrar_teach_pendant()

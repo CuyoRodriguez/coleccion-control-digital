@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="320" viewBox="0 0 1000 320" role="img" aria-labelledby="title desc">
+  <title id="title">Flujo de una simulaci&#243;n</title>
+  <desc id="desc">Crear una secuencia, elegir un controlador, ejecutar y revisar. Las pausas visuales no son paradas del robot f&#237;sico.</desc>
+  <rect width="1000" height="320" rx="16" fill="#131c2e"/>
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+      <path d="M0 0L8 4L0 8" fill="none" stroke="#38bdf8" stroke-width="1.5"/>
+    </marker>
+  </defs>
+  <g font-family="Segoe UI, sans-serif">
+    <text x="24" y="35" fill="#f8fafc" font-size="21" font-weight="600">De la secuencia al resultado</text>
+    <g fill="#1b263b" stroke="#475569">
+      <rect x="24" y="62" width="214" height="85" rx="8"/>
+      <rect x="270" y="62" width="214" height="85" rx="8"/>
+      <rect x="516" y="62" width="214" height="85" rx="8"/>
+      <rect x="762" y="62" width="214" height="85" rx="8"/>
+    </g>
+    <path d="M243 104H260 M489 104H506 M735 104H752" stroke="#38bdf8" stroke-width="2" marker-end="url(#arrow)"/>
+    <g font-size="16" fill="#38bdf8" text-anchor="middle" font-weight="600">
+      <text x="131" y="92">1. Define</text><text x="377" y="92">2. Configura</text>
+      <text x="623" y="92">3. Ejecuta</text><text x="869" y="92">4. Revisa</text>
+    </g>
+    <g font-size="13" fill="#b6c2d4" text-anchor="middle">
+      <text x="131" y="124">Puntos, reposo o A&#8594;X</text><text x="377" y="124">Modo y ganancias</text>
+      <text x="623" y="124">Calcula y reproduce</text><text x="869" y="124">Cuadros, matrices y TXT</text>
+    </g>
+    <path d="M24 173H976 M500 193V271" stroke="#334155"/>
+    <g fill="#f8fafc" font-size="15">
+      <text x="36" y="211">Pausa visual: congela / reanuda la animaci&#243;n.</text>
+      <text x="36" y="245">Reposo: espera Ejecutar dentro de la secuencia.</text>
+      <text x="524" y="211">Reiniciar: vuelve al inicio y conserva segmentos.</text>
+      <text x="524" y="245">Limpiar: borra la secuencia y reinicia el brazo.</text>
+    </g>
+    <text x="24" y="296" fill="#fbbf24" font-size="14">Todo este flujo es virtual. Ejecutar y Pausa no env&#237;an &#243;rdenes al Arduino.</text>
+  </g>
+</svg>

@@ -66,7 +66,7 @@ with module_columns[0]:
     with st.container(border=True):
         st.page_link(
             "pages/8_Simulador_Brazo_SG90.py",
-            label="Simulador Brazo SG90 (v0.5, robot real)",
+            label="Simulador Brazo SG90 (2 GDL)",
             icon="🤖",
             use_container_width=True,
         )
@@ -126,7 +126,7 @@ with st.sidebar:
     )
     st.page_link(
         "pages/8_Simulador_Brazo_SG90.py",
-        label="Simulador Brazo SG90 (v0.5)",
+        label="Simulador Brazo SG90 (2 GDL)",
         icon="🤖",
         use_container_width=True,
     )

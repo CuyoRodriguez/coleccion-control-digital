@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="370" viewBox="0 0 1000 370" role="img" aria-labelledby="title desc">
+  <title id="title">Mapa del simulador SG90</title>
+  <desc id="desc">Ribbon superior para las acciones, gr&#225;fica a la izquierda y resumen matem&#225;tico a la derecha. Esquema ilustrativo.</desc>
+  <rect width="1000" height="370" rx="16" fill="#131c2e"/>
+  <g font-family="Segoe UI, sans-serif">
+    <text x="24" y="34" fill="#f8fafc" font-size="21" font-weight="600">Tu espacio de trabajo</text>
+    <rect x="24" y="52" width="952" height="103" rx="8" fill="#1b263b" stroke="#475569"/>
+    <circle cx="45" cy="73" r="12" fill="#38bdf8"/>
+    <text x="45" y="78" text-anchor="middle" fill="#0f172a" font-size="14" font-weight="700">1</text>
+    <g fill="#f8fafc" font-size="12">
+      <text x="67" y="78">Simulaci&#243;n</text>
+      <text x="175" y="78">An&#225;lisis de Control</text>
+      <text x="332" y="78">Navegaci&#243;n</text>
+      <text x="440" y="78">Robot</text>
+      <text x="500" y="78">C&#243;digo del robot</text>
+      <text x="650" y="78">Enviar al robot f&#237;sico (local)</text>
+      <text x="878" y="78">Asistencia</text>
+    </g>
+    <path d="M37 89H962 M202 101V140 M420 101V140 M620 101V140 M835 101V140" stroke="#475569"/>
+    <g fill="#b6c2d4" font-size="13" text-anchor="middle">
+      <text x="119" y="123">Reproducci&#243;n</text>
+      <text x="311" y="123">L&#237;nea de tiempo</text>
+      <text x="520" y="123">Secuencia</text>
+      <text x="727" y="123">Puntos</text>
+      <text x="899" y="123">Reportes</text>
+    </g>
+    <path d="M489 146L500 138L511 146" fill="none" stroke="#38bdf8" stroke-width="2"/>
+    <rect x="24" y="172" width="540" height="150" rx="8" fill="#1b263b" stroke="#475569"/>
+    <rect x="582" y="172" width="394" height="150" rx="8" fill="#1b263b" stroke="#475569"/>
+    <circle cx="45" cy="194" r="12" fill="#38bdf8"/>
+    <text x="45" y="199" text-anchor="middle" fill="#0f172a" font-size="14" font-weight="700">2</text>
+    <text x="67" y="199" fill="#f8fafc" font-size="15">Gr&#225;fica interactiva</text>
+    <path d="M65 298H530 M65 298V218 M140 218V298 M215 218V298 M290 218V298 M365 218V298 M440 218V298 M65 255H530" stroke="#334155"/>
+    <path d="M150 291L238 228L324 259" fill="none" stroke="#38bdf8" stroke-width="7" stroke-linecap="round"/>
+    <g fill="#f8fafc" stroke="#0f172a" stroke-width="2">
+      <circle cx="150" cy="291" r="6"/><circle cx="238" cy="228" r="6"/><circle cx="324" cy="259" r="6"/>
+    </g>
+    <circle cx="442" cy="234" r="6" fill="#f87171"/>
+    <text x="457" y="238" fill="#b6c2d4" font-size="12">Meta</text>
+    <circle cx="604" cy="194" r="12" fill="#38bdf8"/>
+    <text x="604" y="199" text-anchor="middle" fill="#0f172a" font-size="14" font-weight="700">3</text>
+    <text x="626" y="199" fill="#f8fafc" font-size="15">Resumen matem&#225;tico</text>
+    <g fill="#b6c2d4" font-size="14">
+      <text x="604" y="235">Estado articular &#183; FK / IK &#183; Jacobiano</text>
+      <text x="604" y="265">Din&#225;mica &#183; discretizaci&#243;n</text>
+      <text x="604" y="295">Observabilidad &#183; controlabilidad</text>
+      <text x="24" y="349">1. Configura arriba.   2. Observa el movimiento.   3. Interpreta el modelo.</text>
+    </g>
+  </g>
+</svg>
