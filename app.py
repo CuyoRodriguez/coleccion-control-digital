@@ -90,7 +90,6 @@ with module_columns[1]:
         st.page_link(
             "pages/10_Six_Sigma.py",
             label="Proyecto Six Sigma (DMAIC)",
-            icon="🌿",
             use_container_width=True,
         )
     with st.container(border=True):
@@ -123,7 +122,6 @@ with st.sidebar:
     st.page_link(
         "pages/10_Six_Sigma.py",
         label="Proyecto Six Sigma (DMAIC)",
-        icon="🌿",
         use_container_width=True,
     )
     st.page_link(

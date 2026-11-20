@@ -15,17 +15,37 @@ python -m streamlit run app.py --server.address localhost
 
 La página [Six Sigma](pages/10_Six_Sigma.py) se abre desde la barra lateral
 y los módulos de la página central. Incluye resumen del Project Charter,
-ahorro anual y delta frente a la meta, Pareto, tiempos apilados y Top 3 AMEF.
+ahorro anual y delta frente a la meta, Pareto, tiempos apilados y Top 3 AMEF
+en la pestaña **Análisis**. La pestaña **Soluciones y Control** reúne el
+impacto proyectado, las mejoras y el plan de sostenimiento.
 Su tema verde no cambia el de las otras páginas.
 
-La [instantánea pública](assets/six_sigma_public.json), fechada el
-20 de noviembre de 2026, contiene solo agregados autorizados y etiquetas
+El [módulo de datos](dmaic_data.py), fechado el 20 de noviembre de 2026,
+contiene solo agregados estáticos autorizados y etiquetas
 anonimizadas de equipos reservados. No contiene el Excel, registros individuales,
 identificadores de reserva, nombres de alumnos ni rutas locales.
-No se actualiza automáticamente: cualquier actualización debe regenerarse
-desde el módulo de datos local, revisarse y publicarse sin incorporar datos
-personales. El ahorro calculado es $175,687.50 frente a $120,000 de meta base;
+Las funciones de carga y agregación usan `st.cache_data`; no leen archivos
+de datos ni requieren dependencias adicionales. Cada agrupación tiene su
+propio resumen: no se mezclan ni se suman ambos desgloses.
+No se actualiza automáticamente: cualquier cambio debe revisarse y publicarse
+sin incorporar datos personales. El ahorro calculado es $175,687.50 frente a $120,000 de meta base;
 no se fuerza el importe de la meta ni se cuentan totales duplicados.
+Ambas agrupaciones conservan 4,470 minutos operativos y 915 de inactividad;
+el Top 3 AMEF conserva NPR inicial 720, 560 y 450.
+
+Desde la raíz del portafolio, las [pruebas DMAIC](tests/test_dmaic_data.py)
+verifican agregaciones sintéticas, datos estáticos, caché aislada y navegación:
+
+```powershell
+python -m unittest discover -s .\tests -p test_dmaic_data.py -v
+```
+
+Para comprobar la navegación nativa sin sustituir servidores existentes,
+elige un puerto libre (por ejemplo, 8506):
+
+```powershell
+python -m streamlit run .\app.py --server.address localhost --server.port 8506
+```
 
 ## Brazo SG90 de 2 GDL
 

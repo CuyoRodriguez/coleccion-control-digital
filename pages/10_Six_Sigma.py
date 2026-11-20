@@ -1,145 +1,286 @@
-import json
 from pathlib import Path
 
-import pandas as pd
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import streamlit as st
+from plotly.subplots import make_subplots
 
+from dmaic_data import (
+    DOWNTIME,
+    OPERATING_TIME,
+    DmaicData,
+    aggregate_pareto,
+    aggregate_time_by_group,
+    load_dmaic_data,
+    top_amef_risks,
+)
+
+
+DARK_GREEN = "#1B5E20"
+GREEN = "#2E7D32"
+LIGHT_GREEN = "#4CAF50"
+PALE_GREEN = "#F1F8E9"
 
 st.set_page_config(page_title="Proyecto Six Sigma | DMAIC", layout="wide")
-ROOT = Path(__file__).resolve().parent.parent
+css_path = Path(__file__).resolve().parent.parent / "assets" / "style.css"
 st.markdown(
-    f"<style>{(ROOT / 'assets' / 'style.css').read_text(encoding='utf-8')}</style>",
+    f"<style>{css_path.read_text(encoding='utf-8')}</style>",
     unsafe_allow_html=True,
 )
 st.markdown(
-    r"""
+    rf"""
     <style>
-    [data-testid="stSidebar"] { background: #EAF3EA; }
+    :root {{
+        --dmaic-dark: {DARK_GREEN};
+        --dmaic-green: {GREEN};
+        --dmaic-light: {LIGHT_GREEN};
+        --dmaic-pale: {PALE_GREEN};
+    }}
+    [data-testid="stAppViewContainer"] {{
+        background: linear-gradient(180deg, #f8fbf7 0%, #ffffff 40%);
+    }}
+    [data-testid="stSidebar"] {{
+        background-color: #EAF3EA;
+        border-right: 1px solid #dce8dc;
+    }}
     [data-testid="stSidebar"] h1,
     [data-testid="stSidebar"] h2,
     [data-testid="stSidebar"] h3,
     [data-testid="stSidebar"] p,
     [data-testid="stSidebar"] span,
-    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"],
-    [data-testid="stSidebar"] [data-testid="stCaptionContainer"],
+    [data-testid="stSidebar"] button,
     [data-testid="stSidebar"] label,
-    h1, h2, h3, h4 { color: #1B5E20; }
-    [data-testid="stSidebar"] button { color: #1B5E20; }
-    [data-testid="stMetric"] {
-        background: #F1F8E9;
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"],
+    [data-testid="stSidebar"] [data-testid="stCaptionContainer"] {{
+        color: var(--dmaic-dark);
+    }}
+    h1, h2, h3, h4 {{
+        color: var(--dmaic-dark);
+    }}
+    [data-testid="stTabs"] [role="tab"][aria-selected="true"] {{
+        color: var(--dmaic-dark);
+    }}
+    [data-testid="stTabs"] [data-baseweb="tab-highlight"] {{
+        background-color: var(--dmaic-green);
+    }}
+    [data-testid="stMetric"] {{
+        background: var(--dmaic-pale);
         border: 1px solid #dce8dc;
-        border-radius: 12px;
+        border-radius: 0.75rem;
         padding: 1rem;
-        color: #1B5E20;
-    }
+    }}
     </style>
     """,
     unsafe_allow_html=True,
 )
 
 
-@st.cache_data(show_spinner=False)
-def load_public_snapshot():
-    return json.loads(
-        (ROOT / "assets" / "six_sigma_public.json").read_text(encoding="utf-8")
-    )
+def _format_money(value: float) -> str:
+    sign = "-" if value < 0 else ""
+    return f"{sign}${abs(value):,.2f}"
 
 
-with st.sidebar:
-    st.title("Six Sigma")
-    st.caption("Mejora continua · DMAIC")
-    if st.button("Volver a la página inicial", use_container_width=True):
-        st.switch_page("app.py")
-    section = st.radio(
-        "Navegación",
-        ("Resumen ejecutivo", "Análisis de tiempos", "Gestión de riesgos"),
-    )
-    grouping = st.selectbox("Agrupar análisis por", ("Tipo Equipo", "Equipo Reservado"))
-
-data = load_public_snapshot()
-st.title("Proyecto Six Sigma (DMAIC)")
-st.caption(
-    f"Instantánea pública anonimizada · {data['updated_at']}. "
-    "Solo agregados; no contiene registros individuales ni lee el Excel en vivo."
-)
-
-if section == "Resumen ejecutivo":
+def _render_savings(data: DmaicData) -> None:
+    savings = data["annual_savings"]
+    difference = data["annual_savings_difference"]
+    expected = data["expected_annual_savings"]
+    delta_sign = "+" if difference >= 0 else "-"
     st.metric(
         "Ahorro anual proyectado",
-        f"${data['annual_savings']:,.2f}",
-        delta=f"{'+' if data['annual_savings_difference'] >= 0 else '-'}"
-        rf"\${abs(data['annual_savings_difference']):,.2f} vs. meta de "
-        rf"\${data['expected_annual_savings']:,.2f}",
+        _format_money(savings),
+        delta=rf"{delta_sign}\${abs(difference):,.2f} vs. meta de \${expected:,.2f}",
+        delta_color="normal",
     )
-    st.caption("Importe calculado excluyendo totales duplicados, sin forzar la meta base.")
+    if difference:
+        st.caption(
+            f"El ahorro calculado difiere de la meta base por {_format_money(difference)}."
+        )
+
+
+def _render_charter_summary(data: DmaicData) -> None:
     st.subheader("Resumen ejecutivo · Project Charter")
-    for column, (heading, field) in zip(
+    summary = data["charter_summary"]
+    for column, (heading, text) in zip(
         st.columns(3),
-        (("Problema", "problema"), ("Objetivo", "objetivo"), ("Alcance", "alcance")),
+        (
+            ("Problema", summary["problema"]),
+            ("Objetivo", summary["objetivo"]),
+            ("Alcance", summary["alcance"]),
+        ),
     ):
         with column:
             with st.container(border=True):
                 st.markdown(f"#### {heading}")
-                st.write(data["charter_summary"][field])
-elif section == "Análisis de tiempos":
-    pareto = pd.DataFrame(data["groups"][grouping]["pareto"])
-    totals = pd.DataFrame(data["groups"][grouping]["times"])
-    downtime = "Tiempo Inactividad / Downtime (min)"
-    operating = "Tiempo Operativo (min)"
-    st.subheader("Pareto de tiempos muertos")
+                st.write(text)
+
+
+def _pareto_figure(data: DmaicData, group_by: str) -> go.Figure:
+    pareto = aggregate_pareto(data["times_by_group"][group_by], group_by)
     figure = make_subplots(specs=[[{"secondary_y": True}]])
     figure.add_trace(
         go.Bar(
-            x=pareto[grouping], y=pareto[downtime],
-            name="Minutos de inactividad", marker_color="#4CAF50",
+            x=pareto[group_by],
+            y=pareto[DOWNTIME],
+            name="Minutos de inactividad",
+            marker_color=LIGHT_GREEN,
             hovertemplate=r"%{x}<br>%{y:,.0f} min<extra></extra>",
         ),
         secondary_y=False,
     )
     figure.add_trace(
         go.Scatter(
-            x=pareto[grouping], y=pareto["Porcentaje acumulado (%)"],
-            name="Porcentaje acumulado", mode="lines+markers",
-            line={"color": "#1B5E20", "width": 3},
+            x=pareto[group_by],
+            y=pareto["Porcentaje acumulado (%)"],
+            name="Porcentaje acumulado",
+            mode="lines+markers",
+            line={"color": DARK_GREEN, "width": 3},
+            marker={"size": 8},
             hovertemplate=r"%{x}<br>%{y:.1f}%<extra></extra>",
         ),
         secondary_y=True,
     )
     figure.update_layout(
-        template="plotly_white", height=430,
-        legend={"orientation": "h", "y": 1.15}, hovermode="x unified",
+        template="plotly_white",
+        height=360,
+        margin={"l": 10, "r": 10, "t": 25, "b": 10},
+        legend={"orientation": "h", "y": 1.12, "x": 0},
+        hovermode="x unified",
     )
-    figure.update_xaxes(title_text=grouping)
+    figure.update_xaxes(title_text=group_by)
     figure.update_yaxes(title_text="Minutos", rangemode="tozero", secondary_y=False)
     figure.update_yaxes(title_text="Acumulado (%)", range=[0, 100], secondary_y=True)
-    st.plotly_chart(figure, width="stretch")
+    return figure
 
-    st.subheader("Tiempo operativo vs. inactividad")
-    stacked = go.Figure()
+
+def _time_figure(data: DmaicData, group_by: str) -> go.Figure:
+    totals = aggregate_time_by_group(data["times_by_group"][group_by], group_by)
+    figure = go.Figure()
     for field, label, color in (
-        (operating, "Tiempo operativo", "#2E7D32"),
-        (downtime, "Tiempo de inactividad", "#4CAF50"),
+        (OPERATING_TIME, "Tiempo operativo", GREEN),
+        (DOWNTIME, "Tiempo de inactividad", LIGHT_GREEN),
     ):
-        stacked.add_trace(
+        figure.add_trace(
             go.Bar(
-                x=totals[grouping], y=totals[field], name=label, marker_color=color,
+                x=totals[group_by],
+                y=totals[field],
+                name=label,
+                marker_color=color,
                 hovertemplate=r"%{x}<br>%{y:,.0f} min<extra></extra>",
             )
         )
-    stacked.update_layout(
-        template="plotly_white", barmode="stack", height=430,
-        xaxis_title=grouping, yaxis_title="Minutos",
-        legend={"orientation": "h", "y": 1.15},
+    figure.update_layout(
+        template="plotly_white",
+        barmode="stack",
+        height=360,
+        margin={"l": 10, "r": 10, "t": 25, "b": 10},
+        legend={"orientation": "h", "y": 1.12, "x": 0},
+        yaxis={"title": "Minutos", "rangemode": "tozero"},
     )
-    st.plotly_chart(stacked, width="stretch")
-else:
+    figure.update_xaxes(title_text=group_by)
+    return figure
+
+
+def _render_risks(data: DmaicData) -> None:
+    risks = top_amef_risks(data["amef"], limit=3)
     st.subheader("Top 3 riesgos · NPR inicial")
-    for column, risk in zip(st.columns(3), data["risks"]):
+    if risks.empty:
+        st.info("No hay riesgos completos para mostrar.")
+        return
+    for column, (_, risk) in zip(st.columns(len(risks)), risks.iterrows()):
         with column:
             with st.container(border=True):
-                st.metric("NPR inicial", str(risk["NPR inicial"]))
+                st.metric("NPR inicial", f"{risk['NPR inicial']:,.0f}")
                 for field in ("Descripción", "Modo de falla", "Causa"):
                     st.markdown(f"**{field}**")
                     st.write(risk[field])
+
+
+def _render_solutions_and_control() -> None:
+    st.subheader("Impacto · Antes vs. después")
+    st.caption(
+        "Comparación de la línea base con el escenario proyectado; "
+        "la proyección no representa un resultado medido."
+    )
+    before, after = st.columns(2)
+    with before:
+        with st.container(border=True):
+            st.markdown("#### Línea base")
+            st.metric("Nivel Sigma inicial", "2.21")
+            st.metric("DPMO inicial", "237,500")
+    with after:
+        with st.container(border=True):
+            st.markdown("#### Proyección")
+            st.metric("Nivel Sigma proyectado", "4.0")
+            st.metric("DPMO proyectado", "6,210")
+
+    st.subheader("Mejoras implementadas")
+    for column, (heading, description) in zip(
+        st.columns(3),
+        (
+            (
+                "Poka Yoke Web",
+                "Bloqueo en el sistema web para evitar la saturación de reservas.",
+            ),
+            (
+                "Checklist y 5S",
+                "Tablero de sombras en CNC y checklist impreso de conexión de pines en PLC.",
+            ),
+            (
+                "Automatización",
+                "Sensor autonivelante en impresoras 3D para corregir el eje Z.",
+            ),
+        ),
+    ):
+        with column:
+            with st.expander(heading, expanded=True):
+                st.write(description)
+
+    with st.container(border=True):
+        st.markdown("#### Plan de control")
+        st.markdown(
+            "- Auditorías semanales 5S para sostener el orden y el uso del checklist.\n"
+            "- Revisión mensual del log del servidor web para supervisar las reservas."
+        )
+
+
+dashboard_data = load_dmaic_data()
+with st.sidebar:
+    st.title("Six Sigma")
+    st.caption("Mejora continua · DMAIC")
+    if st.button("Volver a la página inicial", width="stretch"):
+        st.switch_page("app.py")
+    group_by = st.selectbox("Agrupar análisis por", ("Tipo Equipo", "Equipo Reservado"))
+    st.divider()
+    st.caption(
+        f"Resumen ejecutivo anonimizado del estudio DMAIC · {dashboard_data['updated_at']}. "
+        "Datos estáticos; no contiene registros individuales."
+    )
+
+st.title("Proyecto Six Sigma (DMAIC)")
+st.caption("Disponibilidad de la celda de manufactura · Análisis ejecutivo y técnico")
+analysis_tab, control_tab = st.tabs(
+    ["Análisis (Define, Measure, Analyze)", "Soluciones y Control (Improve, Control)"]
+)
+
+with analysis_tab:
+    _render_savings(dashboard_data)
+    with st.expander("Project Charter · Problema, objetivo y alcance"):
+        _render_charter_summary(dashboard_data)
+    pareto_column, time_column = st.columns(2, gap="large")
+    with pareto_column:
+        st.subheader("Pareto de tiempos muertos")
+        st.plotly_chart(
+            _pareto_figure(dashboard_data, group_by),
+            width="stretch",
+            config={"displayModeBar": False},
+        )
+    with time_column:
+        st.subheader("Tiempo operativo vs. inactividad")
+        st.plotly_chart(
+            _time_figure(dashboard_data, group_by),
+            width="stretch",
+            config={"displayModeBar": False},
+        )
+    _render_risks(dashboard_data)
+
+with control_tab:
+    _render_solutions_and_control()
