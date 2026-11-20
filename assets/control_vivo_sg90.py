@@ -5,6 +5,9 @@ import os
 import threading
 import time
 
+US_CERO, US_180 = 1000, 2000  # Escala nominal del protocolo, no calibracion fisica.
+US_MIN, US_MAX = 1028, 1944   # Extremos cuantizados para 5 a 170 grados.
+
 
 class ControlVivoSG90:
     def __init__(self, puerto: str):
@@ -25,8 +28,10 @@ class ControlVivoSG90:
                 puerto, baudrate=115200, timeout=0.1, write_timeout=1, **opciones,
             )
             # El firmware 2 GDL no activa los servos hasta recibir su primera trama.
-            if not self.simulado and self._leer_linea(3) != b'LISTO':
-                raise RuntimeError('Firmware incompatible: se espera LISTO del brazo_sg90.ino de dos motores.')
+            saludo = b'LISTO US2' if self.simulado else self._leer_linea(3)
+            if saludo not in (b'LISTO', b'LISTO US2'):
+                raise RuntimeError('Firmware incompatible: se espera LISTO o LISTO US2 del brazo_sg90.ino.')
+            self._admite_us = saludo == b'LISTO US2'
         except (serial.SerialException, OSError, RuntimeError) as exc:
             self.cerrar()
             raise RuntimeError(f'No se pudo preparar {puerto}: {exc}') from exc
@@ -54,7 +59,17 @@ class ControlVivoSG90:
         if not all(5 <= v <= 170 for v in grados):
             raise ValueError('Movimiento rechazado: limites articulares 5 a 170 grados.')
         comando = tuple(round(v) for v in grados)
-        trama = f'{comando[0]},{comando[1]}\n'.encode('ascii')
+        self._enviar_trama(f'{comando[0]},{comando[1]}\n'.encode('ascii'))
+        return comando
+
+    def enviar_us(self, pulsos) -> None:
+        if len(pulsos) != 2 or not all(type(v) is int and US_MIN <= v <= US_MAX for v in pulsos):
+            raise ValueError(f'Se requieren dos pulsos enteros entre {US_MIN} y {US_MAX} us.')
+        if not self._admite_us:
+            raise RuntimeError('Actualiza el firmware SG90 para reproducir trayectorias en microsegundos.')
+        self._enviar_trama(f'US {pulsos[0]},{pulsos[1]}\n'.encode('ascii'))
+
+    def _enviar_trama(self, trama: bytes) -> None:
         with self._lock:
             if not self.activo:
                 raise RuntimeError('El enlace en vivo esta desconectado.')
@@ -72,7 +87,6 @@ class ControlVivoSG90:
                     f'Control en vivo desactivado: {exc} '
                     'La ultima orden pudo recibirse; comprueba el robot antes de reconectar.'
                 ) from exc
-        return comando
 
     def cerrar(self) -> None:
         with self._lock:

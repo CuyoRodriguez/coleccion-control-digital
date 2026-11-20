@@ -27,7 +27,7 @@ from matplotlib.figure import Figure
 from scipy.signal import cont2discrete, place_poles
 from matplotlib.patches import Circle, Rectangle
 from assets.reporte_sg90 import informe_html, interfaz_grabacion
-from assets.trayectoria_hmi_sg90 import planificar_recorrido
+from assets.trayectoria_hmi_sg90 import planificar_articular, planificar_recorrido
 from assets.control_vivo_sg90 import ControlVivoSG90
 from assets.hardware_sg90.reproducir_simulacion_sg90 import crear_trayectoria
 
@@ -675,6 +675,13 @@ def fk(q1, q2):
     return [0, x1, x2], [0, y1, y2]
 
 
+def ruta_efector(qs):
+    """Posición (x, y) del efector final para una lista de configuraciones articulares (vectorizado)."""
+    qs = np.asarray(qs, dtype=float)
+    xs, ys = fk(qs[:, 0], qs[:, 1])
+    return np.column_stack([xs[2], ys[2]])
+
+
 @st.cache_data(max_entries=1024)
 def ik(x, y):
     """IK con el codo en q2 >= 0 (única rama del robot real); None si no es alcanzable o rompe los límites 5°-170°."""
@@ -800,14 +807,7 @@ def metricas_estabilidad(cuadros, waypoints):
 
 @st.cache_data(max_entries=512)
 def construir_trayectoria(q_inicio, waypoints_q):
-    """Setpoints articulares interpolados linealmente entre waypoints."""
-    trayectoria, q_act = [], q_inicio
-    for p in waypoints_q:
-        t1 = np.linspace(q_act[0], p[0], PASOS_POR_TRAMO)
-        t2 = np.linspace(q_act[1], p[1], PASOS_POR_TRAMO)
-        trayectoria.extend(np.array([a, b]) for a, b in zip(t1, t2))
-        q_act = np.array(p)
-    return trayectoria
+    return planificar_articular(q_inicio, waypoints_q, PASOS_POR_TRAMO, dt)
 
 
 def construir_plan_soldadura(q_inicio, punto_a, punto_x):
@@ -821,21 +821,13 @@ def construir_plan_soldadura(q_inicio, punto_a, punto_x):
 
     q_inicio = np.asarray(q_inicio, dtype=float)
     aproximacion = (
-        np.linspace(q_inicio, np.asarray(q_a), PASOS_POR_TRAMO + 1)[1:]
+        planificar_articular(q_inicio, [q_a], PASOS_POR_TRAMO, dt)
         if not np.allclose(q_inicio, q_a, atol=1e-9)
-        else np.empty((0, 2))
+        else []
     )
-    puntos_xy = np.linspace(punto_a, punto_x, PASOS_POR_TRAMO + 1)[1:]
-    trayectoria_soldadura = []
-    for indice, punto in enumerate(puntos_xy, start=1):
-        q1, q2 = ik(*punto)
-        if q1 is None:
-            raise ValueError(
-                f'El tramo cartesiano A→X sale del espacio alcanzable en la muestra {indice}/{PASOS_POR_TRAMO}.'
-            )
-        trayectoria_soldadura.append((q1, q2))
-
-    trayectoria_q = np.vstack([aproximacion, trayectoria_soldadura])
+    trayectoria_soldadura = planificar_recorrido(q_a, [punto_x], fk, ik, PASOS_POR_TRAMO, dt=dt)
+    puntos_xy = ruta_efector(trayectoria_soldadura)
+    trayectoria_q = [*aproximacion, *trayectoria_soldadura]
     indice_inicio = len(aproximacion)
     indice_fin = indice_inicio + len(trayectoria_soldadura)
     return (
@@ -1197,7 +1189,7 @@ with st.container(key='ribbon_sg90'):
             multiplicador_velocidad = st.slider(
                 'Velocidad de reproducción / USB (x)', min_value=0.5, max_value=5.0,
                 value=1.0, step=0.5, key='velocidad_reproduccion',
-                help='Escala los tiempos de la animación y de la trayectoria exportada o enviada por USB; no cambia la integración.',
+                help='Escala la animación y solicita una velocidad de exportación. El ZIP y USB pueden ir más lento para respetar los límites.',
             )
             st.caption('Línea de tiempo')
         with col_estado:
@@ -1508,7 +1500,7 @@ if ejecutar:
                     plan_hmi = (
                         planificar_recorrido(
                             st.session_state.estado['q'], [w[:2] for w in waypoints], fk, ik,
-                            PASOS_POR_TRAMO, curvas=conexion_hmi == 'curvas',
+                            PASOS_POR_TRAMO, curvas=conexion_hmi == 'curvas', dt=dt,
                         ) if conexion_hmi else None
                     )
                     cuadros_segmento = simular(
@@ -1577,13 +1569,6 @@ def leyenda_oscura(ax, **kw):
         leyenda = ax.legend(facecolor=COLOR_FONDO, edgecolor=COLOR_GRID, **kw)
         for texto in leyenda.get_texts():
             texto.set_color(COLOR_TEXTO)
-
-
-def ruta_efector(qs):
-    """Posición (x, y) del efector final para una lista de configuraciones articulares (vectorizado)."""
-    qs = np.asarray(qs, dtype=float)
-    xs, ys = fk(qs[:, 0], qs[:, 1])
-    return np.column_stack([xs[2], ys[2]])
 
 
 @st.cache_data
@@ -2545,6 +2530,12 @@ def _trayectoria_robot_actual():
 
 
 trayectoria_robot_json, error_trayectoria_robot = _trayectoria_robot_actual()
+datos_robot = json.loads(trayectoria_robot_json) if trayectoria_robot_json else None
+if datos_robot:
+    periodo_robot = datos_robot['periodo_s']
+    ritmo_robot = (' · limitado por velocidad/aceleración'
+                   if periodo_robot > dt / multiplicador_velocidad else ' · mismo ritmo que la animación')
+    resumen_tiempo_robot = f'{len(cuadros)} muestras · {len(cuadros) * periodo_robot:.2f} s{ritmo_robot}'
 
 
 @st.cache_data
@@ -2564,7 +2555,7 @@ def _zip_paquete_hw(trayectoria_json=None):
             z.writestr('brazo_sg90_export/hardware/trayectoria.json', trayectoria_json)
         z.writestr('brazo_sg90_export/LEEME.txt', (
             'Reproduccion de la simulacion desde el PC por USB.\n'
-            + ('Incluye trayectoria.json con los angulos y tiempos calculados por la web.\n'
+            + ('Incluye trayectoria.json v2 con los pulsos nominales y tiempos calculados por la web.\n'
                if trayectoria_json is not None else
                'SIN TRAYECTORIA. Agrega puntos, simula y vuelve a exportar para incluirla.\n')
             + 'El firmware no ejecuta movimientos al descargar ni al cargar el sketch.\n'
@@ -2576,7 +2567,7 @@ def _zip_paquete_hw(trayectoria_json=None):
             'python reproducir_simulacion_sg90.py --puerto COM3\n'
             'Sustituye COM3 por tu puerto. loop:// es solo eco, no mueve hardware.\n'
             'El programa pide confirmacion y aplica la pose inicial sin rampa; espera 1 s antes del recorrido.\n'
-            'Iguales consignas y tiempos, redondeadas a grados enteros; no garantiza igual movimiento fisico.\n'
+            'Usa el firmware de este ZIP para las consignas en microsegundos. El PCA9685 aplica su propia resolucion.\n'
             'El ACK confirma recepcion, no posicion. Si el serial se retrasa, interrumpe sin recuperar en rafaga.\n'
             'Ctrl+C detiene el envio, no corta la alimentacion de los servos.\n'
         ))
@@ -2599,8 +2590,8 @@ def _mostrar_guia_robot(tema):
             '2. Instala **Adafruit PWM Servo Driver Library** con sus dependencias y abre '
             '`hardware/brazo_sg90/brazo_sg90.ino` en Arduino IDE. En el Uno, conecta SDA a A4 y SCL a A5; '
             'hombro al canal 0 y codo al canal 1. VCC es la lógica y V+ va a la fuente externa de los servos.\n'
-            '3. Descomprime el ZIP completo. `reproducir_simulacion_sg90.py` reproduce las muestras calculadas, '
-            'sin volver a resolver IK ni integrar la dinámica.\n'
+            '3. Descomprime el ZIP completo. El reproductor envía las muestras calculadas en microsegundos; '
+            'las exportaciones nuevas requieren el firmware incluido en el ZIP.\n'
             '4. Conserva la calibración PWM verificada del robot e instala pyserial. '
             'El ejemplo de firmware usa 1000–2000 µs, no presupone que 500–2400 µs sea seguro. '
             'Sustituye `COM3` por tu puerto.'
@@ -2782,7 +2773,7 @@ def _mostrar_asistencia_simulador():
             'Reposo inserta una pausa. La conexión en curvas solo afecta a los nuevos posicionamientos HMI, '
             'nunca a la pasada de soldadura. Puedes cerrar haciendo clic fuera: los segmentos se conservan. '
             'Los recorridos HMI se editan virtualmente. Tras simularlos, puedes exportarlos o enviarlos '
-            'desde **Enviar al robot físico (local)** con los mismos tiempos. '
+            'desde **Enviar al robot físico (local)** con el período limitado que indica la exportación. '
             '**Movimiento en vivo · USB local** permite enviar solo la cruceta e Ir en modo Cinemático, '
             'tras elegir puerto y confirmar el arranque a (90°, 90°). Requiere el firmware de dos servos '
             'PCA9685 CH0/CH1, no el de 4 GDL. Cerrar el modal desconecta el puerto, no corta la alimentación.'
@@ -2896,7 +2887,7 @@ with tab_codigo:
             with c_zip:
                 st.download_button('📦', _zip_paquete_hw(trayectoria_robot_json),
                                    file_name='brazo_sg90_export.zip', mime='application/zip', use_container_width=False,
-                                   help='Exportar Arduino, reproductor USB y, si está calculada, la trayectoria exacta de la simulación.')
+                                   help='Exportar Arduino, reproductor USB y las muestras simuladas con tiempos limitados.')
                 st.caption('Exportar trayectoria + Arduino' if trayectoria_robot_json else 'Paquete sin trayectoria')
             st.caption('Descargas')
         with asistencia:
@@ -2907,8 +2898,7 @@ with tab_codigo:
             st.caption('Asistencia')
         with instrucciones:
             if trayectoria_robot_json:
-                st.caption(f'Trayectoria incluida · {len(cuadros)} muestras · '
-                           f'{len(cuadros) * dt / multiplicador_velocidad:.2f} s · {multiplicador_velocidad:g}x')
+                st.caption(f'Trayectoria incluida · {resumen_tiempo_robot}')
             else:
                 st.info(error_trayectoria_robot)
                 if st.button('Simular para exportar', key='calcular_exportacion',
@@ -3045,8 +3035,7 @@ with tab_robot:
             st.caption(f'CONTROL · {modo}')
             st.caption(f'{len(waypoints_operacionales())} puntos · Límites del modelo 5°–170°')
             if trayectoria_robot_json:
-                st.caption(f'{len(cuadros)} muestras · {len(cuadros) * dt / multiplicador_velocidad:.2f} s · '
-                           f'{multiplicador_velocidad:g}x · mismos tiempos que la animación')
+                st.caption(resumen_tiempo_robot)
             st.caption('Estado')
         st.caption('1. Añade puntos en Simulación o Control HMI → 2. Simula → 3. Ejecuta en robot por USB, '
                    'o exporta el ZIP. Sin puntos, usa el mando manual HMI.')
@@ -3068,8 +3057,8 @@ with tab_robot:
             elif not puertos:
                 st.caption('No se detectó ningún puerto. Conecta el Arduino, o usa loop:// para probar sin placa.')
 
-            inicio_robot = json.loads(trayectoria_robot_json)['inicio_deg'] if trayectoria_robot_json else None
-            estado.caption(f'Inicio sin rampa: {inicio_robot} grados' if inicio_robot else 'Calcula primero la trayectoria.')
+            inicio_robot = datos_robot['inicio_us'] if datos_robot else None
+            estado.caption(f'Inicio sin rampa: {inicio_robot} µs nominales' if inicio_robot else 'Calcula primero la trayectoria.')
             firma_confirmacion = hashlib.sha256(
                 (trayectoria_robot_json or firma_robot.encode('utf-8'))
             ).hexdigest()
@@ -3307,7 +3296,7 @@ def _hmi_figura():
                 puntos.append(pendientes[indice]['waypoint'][:2])
                 indice += 1
             try:
-                plan = planificar_recorrido(q_previo, puntos, fk, ik, PASOS_POR_TRAMO, curvas=conexion == 'curvas')
+                plan = planificar_recorrido(q_previo, puntos, fk, ik, PASOS_POR_TRAMO, curvas=conexion == 'curvas', dt=dt)
             except ValueError as exc:
                 st.session_state.hmi_aviso = ('warning', str(exc))
                 q_previo = np.asarray(ik(*puntos[-1]))

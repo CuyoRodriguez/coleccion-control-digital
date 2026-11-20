@@ -24,7 +24,13 @@ python -m streamlit run app.py --server.address localhost
   para los servos, con tierra común. Calibra los pulsos de cada eje sin carga.
 - **Una trayectoria para simulación y USB:** agrega posiciones en la gráfica,
   Manual o Control HMI y pulsa **Simular trayectoria** (o ▶️). La **Velocidad de
-  reproducción / USB** escala los tiempos de la animación, del ZIP y del envío.
+  reproducción / USB** escala la animación y solicita el ritmo del ZIP y del
+  envío. En tramos rectos o articulares el perfil quíntico frena en cada
+  vértice; en curvas se conserva la geometría y se reduce el ritmo si hace
+  falta. Los límites de las consignas son **40°/s** y **120°/s²** por
+  articulación. Después de cuantizar a microsegundos, la exportación aumenta
+  su período si es necesario sin cambiar ni saltarse muestras. Estos límites
+  son de diseño y no certifican el movimiento físico del servo.
   Después, **Ejecutar en robot · USB** reproduce los cuadros calculados sin
   recalcular IK ni dinámica. También admite las curvas HMI y pasadas A→X.
   Las pausas Reposo, sin duración definida, no se exportan. Si cambias puntos
@@ -40,10 +46,60 @@ python -m streamlit run app.py --server.address localhost
   Sustituye COM3 por tu puerto. Descargar o cargar el firmware no reproduce
   automáticamente nada. Sin puntos, el paquete no incluye trayectoria y el
   mando manual local sigue disponible en Control HMI.
-- La exportación usa ángulos del brazo simulado, redondeados a grados enteros
-  por el protocolo; rechaza muestras fuera de 5°–170° sin recortarlas.
-  Conserva la calibración física verificada: el firmware de ejemplo mantiene
-  1000–2000 µs. No se garantiza el mismo movimiento ni las mismas oscilaciones
+- Para auditar las consignas exportadas sin conectar el brazo, ejecuta desde
+  la raíz del proyecto:
+  ```powershell
+  python -m scripts.auditar_trayectoria_sg90 "C:\ruta\hardware\trayectoria.json"
+  python -m scripts.auditar_trayectoria_sg90 "C:\ruta\hardware\trayectoria.json" --grafica telemetria.png
+  ```
+  Con `--grafica` se guardan las tres curvas de q₁ y q₂ con los límites de
+  40 °/s y 120 °/s², y el comando devuelve un error si alguna muestra queda
+  fuera. Para marcar esquinas, añade `--vertice N` por cada número de muestra
+  exportada (desde 1). El JSON no identifica los vértices por sí solo.
+  La derivada se calcula sin filtrar y supone reposo antes y después de la secuencia.
+  Los picos usan el período del JSON y los ángulos nominales de las consignas.
+  La primera muestra se etiqueta `t=0`; el salto desde la consigna inicial se
+  evalúa con el período nominal. El informe no mide el movimiento físico.
+  Para medir el efecto del redondeo en la punta, el mismo módulo ofrece
+  `error_tcp_mm(referencia_deg, exportada_deg)`. Necesita los cuadros de
+  simulación sin redondear, alineados con las muestras del JSON; el JSON por
+  sí solo no contiene la referencia.
+- **Medición visual sin robot:** graba una hoja fija con un marcador rojo o
+  verde (centrado en la posición que quieras medir). Usa una cámara fija, sin
+  cambiar el zoom. Anota las esquinas en píxeles desde el primer fotograma en
+  orden superior izquierda, superior derecha, inferior derecha e inferior
+  izquierda. Ejemplo para una hoja A4 en horizontal (sustituye los píxeles):
+  ```powershell
+  python -m pip install "opencv-python-headless==4.11.0.86"
+  python -m scripts.medir_punta_sg90 video_prueba.mp4 --esquinas 100 80 590 95 560 390 120 375 --hoja-mm 297 210 --color rojo --salida medicion_punta.csv
+  ```
+  El CSV registra tiempo nominal (`fotograma / FPS`; usa un video de frecuencia
+  constante para sincronizar), detección y XY por cuadro. Si no ve el marcador,
+  deja las coordenadas vacías. Si omites `--hoja-mm`, solo mide en píxeles.
+  Los milímetros se refieren a la esquina inferior izquierda, con Y hacia
+  arriba. La transformación supone que el marcador está en el plano del
+  papel; no corrige la distorsión del lente. Este script local no abre
+  puertos de cámara ni USB.
+- Para comparar esa medición con la trayectoria exportada:
+  ```powershell
+  python -m scripts.comparar_trayectorias_sg90 medicion_punta.csv "C:\ruta\hardware\trayectoria.json" --hombro-mm 148.5 10 --inicio-video-s 1.5 --grafica comparacion.png
+  ```
+  `--hombro-mm` es la posición del hombro medida sobre la hoja (mismo origen
+  inferior izquierdo); se supone que los ejes de la hoja son paralelos a los
+  del robot. `--inicio-video-s` es el instante del video en que se envía la
+  primera muestra; desde ahí la muestra *i* corresponde a `i · periodo_s`. El
+  trazo teórico es la cinemática directa de las consignas (L1 = L2 = 100 mm).
+  Imprime el error sincronizado (mismo instante) y el geométrico (distancia
+  al trazo, insensible al desfase temporal), ambos medio y máximo en mm. Si
+  el sincronizado es mucho mayor que el geométrico, revisa
+  `--inicio-video-s`; si ambos son altos, revisa `--hombro-mm`.
+- La exportación v2 usa pulsos nominales enteros en microsegundos
+  (`inicio_us`, `muestras_us`), sin redondear primero a grados. Rechaza muestras
+  fuera de 5°–170° sin recortarlas. Usa el firmware incluido en el ZIP:
+  mantiene el PCA9685, aplica la calibración por canal y convierte los pulsos
+  a ticks de aproximadamente 4.9 µs a 50 Hz. El mando manual y los JSON v1
+  siguen admitiendo grados enteros. Conserva la calibración física verificada;
+  el ejemplo mantiene 1000–2000 µs por canal. No se garantiza el mismo movimiento ni las mismas oscilaciones
   físicas: influyen carga, alimentación y rampa interna del firmware.
   El reproductor exige un ACK exacto por muestra y aborta si el serial se
   retrasa más de 100 ms o dos periodos, lo que sea mayor, sin enviar una ráfaga

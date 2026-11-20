@@ -12,7 +12,7 @@ import streamlit as st
 from streamlit.testing.v1 import AppTest
 
 from assets.control_vivo_sg90 import ControlVivoSG90
-from assets.trayectoria_hmi_sg90 import planificar_recorrido
+from assets.trayectoria_hmi_sg90 import ACEL_MAX_DEG_S2, VEL_MAX_DEG_S, planificar_articular, planificar_recorrido
 
 RAIZ = Path(__file__).resolve().parents[1]
 
@@ -25,9 +25,25 @@ class TrayectoriaHMITests(unittest.TestCase):
         recta = np.asarray(planificar_recorrido([0, 0], puntos, fk, ik, 60))
         curva = np.asarray(planificar_recorrido([0, 0], puntos, fk, ik, 60, curvas=True))
         for ruta in (recta, curva):
-            np.testing.assert_allclose(ruta[[59, 119]], puntos, atol=1e-10)
+            for punto in puntos:
+                self.assertLess(np.linalg.norm(ruta - punto, axis=1).min(), 1e-10)
         np.testing.assert_allclose(recta[:60, 0], recta[:60, 1])
-        self.assertGreater(np.max(np.abs(curva[:60, 0] - curva[:60, 1])), 0.1)
+        i_vertice = np.linalg.norm(curva - puntos[0], axis=1).argmin()
+        self.assertGreater(np.max(np.abs(curva[:i_vertice, 0] - curva[:i_vertice, 1])), 0.1)
+
+    def test_tramos_articulares_frenan_en_el_vertice_y_respetan_limites(self):
+        inicio = np.radians([90, 90])
+        vertice, final = np.radians([[150, 45], [50, 140]])
+        ida = planificar_articular(inicio, [vertice], 60, 0.02)
+        ruta = planificar_articular(inicio, [vertice, final], 60, 0.02)
+        self.assertGreater(len(ida), 60)
+        np.testing.assert_allclose(ruta[len(ida) - 1], vertice)
+        np.testing.assert_allclose(ruta[-1], final)
+        q = np.degrees([inicio, inicio, *ruta, ruta[-1]])
+        velocidad = np.diff(q, axis=0) / 0.02
+        self.assertLess(np.max(np.abs(velocidad[len(ida):len(ida) + 2])), 1.0)
+        self.assertLessEqual(np.max(np.abs(velocidad)), VEL_MAX_DEG_S)
+        self.assertLessEqual(np.max(np.abs(np.diff(velocidad, axis=0))) / 0.02, ACEL_MAX_DEG_S2)
 
     def test_rechaza_ruta_con_extremos_validos_pero_interior_prohibido(self):
         fk = lambda x, y: ([0, x], [0, y])
@@ -91,7 +107,7 @@ class TeachPendantSG90Tests(unittest.TestCase):
         self.assertGreater(len(cuadros), 2)
         self.assertEqual(self.app.session_state['indice_secuencia'], 1)
         self.assertTrue(all(not c['soldadura_activa'] for c in cuadros))
-        self.assertTrue(any('mismos tiempos' in texto.value for texto in self.app.caption))
+        self.assertTrue(any('limitado por velocidad/aceleración' in texto.value for texto in self.app.caption))
         self.assertIn('robot_firma_calculada', self.app.session_state)
         q = np.asarray([c['q'] for c in cuadros[:60]])
         x = 100 * (np.cos(q[:, 0]) + np.cos(q.sum(axis=1)))
@@ -120,10 +136,11 @@ class TeachPendantSG90Tests(unittest.TestCase):
         self.pulsar('hmi_ejecutar')
         self.assertTrue(self.app.session_state['pausa_activa'])
         self.assertEqual(self.app.session_state['indice_secuencia'], 3)
-        q = np.asarray([c['q'] for c in self.app.session_state['cuadros'][:120]])
+        q = np.asarray([c['q'] for c in self.app.session_state['cuadros'] if c['estado_operacional'] == 'Posicionamiento libre'])
         ruta = 100 * np.column_stack((np.cos(q[:, 0]) + np.cos(q.sum(axis=1)),
                                      np.sin(q[:, 0]) + np.sin(q.sum(axis=1))))
-        np.testing.assert_allclose(ruta[[59, 119]], [[-70, 120], [0, 140]], atol=1e-8)
+        for punto in ((-70, 120), (0, 140)):
+            self.assertLess(np.linalg.norm(ruta - punto, axis=1).min(), 1e-8)
         self.assertGreater(np.max(np.abs(30 * (ruta[:60, 1] - 100) - 20 * (ruta[:60, 0] + 100))), 1)
         self.pulsar('hmi_ejecutar')
         self.assertFalse(self.app.session_state['pausa_activa'])
