@@ -26,6 +26,16 @@ de trabajar:
 | [06_decisiones_y_lecciones.md](./06_decisiones_y_lecciones.md) | Por qué se hizo así, trampas conocidas y preferencias de trabajo |
 | [07_guia_grabacion_companeros.md](./07_guia_grabacion_companeros.md) | Mensaje listo para pedir videos de prueba a los compañeros |
 
+## Dónde está el código
+
+| Carpeta | Qué contiene |
+|---|---|
+| `C:\Users\seb10\Documents\ProyectoBrazoRobotico\v0.7` | **Copia completa y más reciente.** Todo lo de GitHub más el material local: entrenamiento RL 4 GDL (`entrenar_rl_4dof.py`, `modelos_rl_4dof/`), `firmware_4dof/`, `centrar_servos_sg90.py`, pruebas 4 GDL y experimentos RL 2 GDL. |
+| `C:\Users\seb10\Documents\Codigo Pagina` | Repositorio de GitHub `CuyoRodriguez/coleccion-control-digital` (web pública). Solo SG90 + vista 4 GDL; los experimentos RL 2 GDL están ocultos con `.git/info/exclude`. |
+| `ProyectoBrazoRobotico\archivo_v0.7_antiguo` | Documentos y archivos viejos sacados de v0.7 (solo como respaldo). |
+
+Si se cambia algo en `Codigo Pagina`, hay que copiarlo también a `ProyectoBrazoRobotico\v0.7` (o al revés) para que no se desincronicen.
+
 ## Resumen en 5 líneas
 
 1. El **software del SG90 de 2 GDL está prácticamente completo** (≈90–95 %); falta la prueba física.
