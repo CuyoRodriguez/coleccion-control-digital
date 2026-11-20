@@ -70,8 +70,8 @@ if section == "Resumen ejecutivo":
         "Ahorro anual proyectado",
         f"${data['annual_savings']:,.2f}",
         delta=f"{'+' if data['annual_savings_difference'] >= 0 else '-'}"
-        f"${abs(data['annual_savings_difference']):,.2f} vs. meta de "
-        f"${data['expected_annual_savings']:,.2f}",
+        rf"\${abs(data['annual_savings_difference']):,.2f} vs. meta de "
+        rf"\${data['expected_annual_savings']:,.2f}",
     )
     st.caption("Importe calculado excluyendo totales duplicados, sin forzar la meta base.")
     st.subheader("Resumen ejecutivo · Project Charter")
