@@ -88,6 +88,13 @@ with module_columns[0]:
 with module_columns[1]:
     with st.container(border=True):
         st.page_link(
+            "pages/10_Six_Sigma.py",
+            label="Proyecto Six Sigma (DMAIC)",
+            icon="🌿",
+            use_container_width=True,
+        )
+    with st.container(border=True):
+        st.page_link(
             "pages/1_Control_Digital.py",
             label="Control Digital",
             icon="📘",
@@ -113,6 +120,12 @@ st.markdown('<div style="height: 50px;"></div>', unsafe_allow_html=True)
 with st.sidebar:
     st.title("Acceso rápido")
     st.caption("Selecciona una sección")
+    st.page_link(
+        "pages/10_Six_Sigma.py",
+        label="Proyecto Six Sigma (DMAIC)",
+        icon="🌿",
+        use_container_width=True,
+    )
     st.page_link(
         "pages/1_Control_Digital.py",
         label="Control Digital",

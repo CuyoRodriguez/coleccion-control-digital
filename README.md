@@ -11,6 +11,22 @@ python -m pip install -r requirements.txt
 python -m streamlit run app.py --server.address localhost
 ```
 
+## Proyecto Six Sigma (DMAIC)
+
+La página [Six Sigma](pages/10_Six_Sigma.py) se abre desde la barra lateral
+y los módulos de la página central. Incluye resumen del Project Charter,
+ahorro anual y delta frente a la meta, Pareto, tiempos apilados y Top 3 AMEF.
+Su tema verde no cambia el de las otras páginas.
+
+La [instantánea pública](assets/six_sigma_public.json), fechada el
+20 de noviembre de 2026, contiene solo agregados autorizados y etiquetas
+anonimizadas de equipos reservados. No contiene el Excel, registros individuales,
+identificadores de reserva, nombres de alumnos ni rutas locales.
+No se actualiza automáticamente: cualquier actualización debe regenerarse
+desde el módulo de datos local, revisarse y publicarse sin incorporar datos
+personales. El ahorro calculado es $175,687.50 frente a $120,000 de meta base;
+no se fuerza el importe de la meta ni se cuentan totales duplicados.
+
 ## Brazo SG90 de 2 GDL
 
 - **Control HMI** permite probar poses y editar la secuencia virtual. El
