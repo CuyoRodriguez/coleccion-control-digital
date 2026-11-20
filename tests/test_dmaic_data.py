@@ -21,14 +21,17 @@ class DmaicDataTests(unittest.TestCase):
         load_dmaic_data.clear()
         with patch("builtins.open", side_effect=AssertionError("Unexpected file read")):
             data = load_dmaic_data()
-        self.assertEqual(data["annual_savings"], 175_687.50)
-        self.assertEqual(data["expected_annual_savings"], 120_000.00)
-        self.assertEqual(data["annual_savings_difference"], 55_687.50)
         for group in GROUP_FIELDS:
             with self.subTest(group=group):
                 times = aggregate_time_by_group(data["times_by_group"][group], group)
                 self.assertEqual(times[OPERATING_TIME].sum(), 4470)
                 self.assertEqual(times[DOWNTIME].sum(), 915)
+                self.assertEqual(data["pilot_downtime_minutes"], times[DOWNTIME].sum())
+                total_minutes = times[OPERATING_TIME].sum() + times[DOWNTIME].sum()
+                self.assertEqual(data["pilot_total_minutes"], total_minutes)
+                self.assertAlmostEqual(
+                    data["pilot_inactivity_rate"], times[DOWNTIME].sum() / total_minutes * 100
+                )
                 pareto = aggregate_pareto(data["times_by_group"][group], group)
                 self.assertTrue(pareto[DOWNTIME].is_monotonic_decreasing)
                 self.assertEqual(pareto.iloc[-1]["Porcentaje acumulado (%)"], 100)
@@ -107,15 +110,35 @@ class DmaicDataTests(unittest.TestCase):
         self.assertEqual(len(app.tabs[0].get("plotly_chart")), 2)
         self.assertEqual(
             [metric.value for metric in app.tabs[0].metric],
-            ["$175,687.50", "720", "560", "450"],
+            ["16.99%", "23.75%", "720", "560", "450"],
+        )
+        self.assertEqual(
+            [metric.label for metric in app.tabs[0].metric[:2]],
+            ["Inactividad Muestra Piloto (Sep 2026)", "Línea Base Histórica Semestral"],
+        )
+        self.assertEqual(
+            [metric.delta for metric in app.tabs[0].metric[:2]],
+            ["915 min perdidos de 5,385 min totales", "Meta CTQ: 11.87% (-50%)"],
         )
         self.assertEqual(
             [metric.value for metric in app.tabs[1].metric],
             ["2.21", "237,500", "4.0", "6,210"],
         )
+        self.assertEqual(
+            app.tabs[1].subheader[0].value,
+            "Acciones Recomendadas (Plan de Mejora AMEF)",
+        )
+        self.assertEqual(
+            [expander.label for expander in app.tabs[1].expander],
+            ["Poka Yoke Web", "Checklist y 5S", "Sensor Autonivelante 3D"],
+        )
         app.selectbox[0].set_value("Equipo Reservado").run()
         self.assertFalse(app.exception)
         self.assertEqual(len(app.get("plotly_chart")), 2)
+        self.assertEqual(
+            [metric.value for metric in app.tabs[0].metric[:2]],
+            ["16.99%", "23.75%"],
+        )
         app.button[0].click().run()
         self.assertFalse(app.exception)
         self.assertFalse(app.tabs)

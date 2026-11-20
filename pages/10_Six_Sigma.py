@@ -68,32 +68,39 @@ st.markdown(
         border-radius: 0.75rem;
         padding: 1rem;
     }}
+    [data-testid="stTabs"] [data-testid="stMetricDelta"] [data-testid="stMarkdownContainer"],
+    [data-testid="stTabs"] [data-testid="stMetricDelta"] p {{
+        white-space: normal;
+        overflow: visible;
+        text-overflow: clip;
+    }}
     </style>
     """,
     unsafe_allow_html=True,
 )
 
 
-def _format_money(value: float) -> str:
-    sign = "-" if value < 0 else ""
-    return f"{sign}${abs(value):,.2f}"
-
-
-def _render_savings(data: DmaicData) -> None:
-    savings = data["annual_savings"]
-    difference = data["annual_savings_difference"]
-    expected = data["expected_annual_savings"]
-    delta_sign = "+" if difference >= 0 else "-"
-    st.metric(
-        "Ahorro anual proyectado",
-        _format_money(savings),
-        delta=rf"{delta_sign}\${abs(difference):,.2f} vs. meta de \${expected:,.2f}",
-        delta_color="normal",
-    )
-    if difference:
-        st.caption(
-            f"El ahorro calculado difiere de la meta base por {_format_money(difference)}."
+def _render_operational_kpis(data: DmaicData) -> None:
+    pilot, historical = st.columns(2)
+    with pilot:
+        st.metric(
+            "Inactividad Muestra Piloto (Sep 2026)",
+            f"{data['pilot_inactivity_rate']:.2f}%",
+            delta=(
+                f"{data['pilot_downtime_minutes']:,.0f} min perdidos de "
+                f"{data['pilot_total_minutes']:,.0f} min totales"
+            ),
+            delta_color="off",
         )
+        st.caption("86 registros · Tasa calculada sobre los minutos de la muestra piloto.")
+    with historical:
+        st.metric(
+            "Línea Base Histórica Semestral",
+            f"{data['historical_inactivity_rate']:.2f}%",
+            delta=f"Meta CTQ: {data['target_inactivity_rate']:.2f}% (-50%)",
+            delta_color="normal",
+        )
+        st.caption("Project Charter · Referencia histórica distinta de la muestra piloto.")
 
 
 def _render_charter_summary(data: DmaicData) -> None:
@@ -195,11 +202,13 @@ def _render_risks(data: DmaicData) -> None:
 
 
 def _render_solutions_and_control() -> None:
-    st.subheader("Impacto · Antes vs. después")
+    st.subheader("Acciones Recomendadas (Plan de Mejora AMEF)")
     st.caption(
-        "Comparación de la línea base con el escenario proyectado; "
-        "la proyección no representa un resultado medido."
+        "Contramedidas diseñadas para reducir el NPR y proyectar un Nivel Sigma de 4.0. "
+        "El proyecto está en fase de análisis y propuesta; no son resultados de "
+        "implementación medidos."
     )
+    st.subheader("Impacto proyectado · Línea base vs. meta")
     before, after = st.columns(2)
     with before:
         with st.container(border=True):
@@ -212,21 +221,22 @@ def _render_solutions_and_control() -> None:
             st.metric("Nivel Sigma proyectado", "4.0")
             st.metric("DPMO proyectado", "6,210")
 
-    st.subheader("Mejoras implementadas")
+    st.subheader("Contramedidas propuestas")
     for column, (heading, description) in zip(
         st.columns(3),
         (
             (
                 "Poka Yoke Web",
-                "Bloqueo en el sistema web para evitar la saturación de reservas.",
+                "Incorporar un bloqueo en el sistema web para evitar la saturación de reservas.",
             ),
             (
                 "Checklist y 5S",
-                "Tablero de sombras en CNC y checklist impreso de conexión de pines en PLC.",
+                "Implementar un tablero de sombras en CNC y un checklist impreso "
+                "de conexión de pines en PLC.",
             ),
             (
-                "Automatización",
-                "Sensor autonivelante en impresoras 3D para corregir el eje Z.",
+                "Sensor Autonivelante 3D",
+                "Instalar un sensor autonivelante en impresoras 3D para corregir el eje Z.",
             ),
         ),
     ):
@@ -235,10 +245,10 @@ def _render_solutions_and_control() -> None:
                 st.write(description)
 
     with st.container(border=True):
-        st.markdown("#### Plan de control")
+        st.markdown("#### Plan de control propuesto")
         st.markdown(
-            "- Auditorías semanales 5S para sostener el orden y el uso del checklist.\n"
-            "- Revisión mensual del log del servidor web para supervisar las reservas."
+            "- Realizar auditorías semanales 5S para sostener el orden y el uso del checklist.\n"
+            "- Programar la revisión mensual del log del servidor web para supervisar las reservas."
         )
 
 
@@ -262,7 +272,7 @@ analysis_tab, control_tab = st.tabs(
 )
 
 with analysis_tab:
-    _render_savings(dashboard_data)
+    _render_operational_kpis(dashboard_data)
     with st.expander("Project Charter · Problema, objetivo y alcance"):
         _render_charter_summary(dashboard_data)
     pareto_column, time_column = st.columns(2, gap="large")

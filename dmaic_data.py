@@ -77,9 +77,11 @@ _CHARTER = {
 
 class DmaicData(TypedDict):
     updated_at: str
-    annual_savings: float
-    expected_annual_savings: float
-    annual_savings_difference: float
+    pilot_downtime_minutes: float
+    pilot_total_minutes: float
+    pilot_inactivity_rate: float
+    historical_inactivity_rate: float
+    target_inactivity_rate: float
     charter_summary: dict[str, str]
     times_by_group: dict[str, pd.DataFrame]
     amef: pd.DataFrame
@@ -105,18 +107,22 @@ def _validate_group(frame: pd.DataFrame, group_by: str) -> None:
 @st.cache_data(show_spinner=False)
 def load_dmaic_data() -> DmaicData:
     """Devuelve una copia cacheada del estudio, sin registros individuales."""
-    annual_savings = 175_687.50
-    expected_annual_savings = 120_000.00
+    times_by_group = {
+        group: pd.DataFrame(rows, columns=[group, OPERATING_TIME, DOWNTIME])
+        for group, rows in _TIME_GROUPS.items()
+    }
+    pilot_times = times_by_group["Tipo Equipo"]
+    downtime_minutes = float(pilot_times[DOWNTIME].sum())
+    total_minutes = float(pilot_times[OPERATING_TIME].sum()) + downtime_minutes
     return {
         "updated_at": "2026-11-20",
-        "annual_savings": annual_savings,
-        "expected_annual_savings": expected_annual_savings,
-        "annual_savings_difference": annual_savings - expected_annual_savings,
+        "pilot_downtime_minutes": downtime_minutes,
+        "pilot_total_minutes": total_minutes,
+        "pilot_inactivity_rate": downtime_minutes / total_minutes * 100,
+        "historical_inactivity_rate": 23.75,
+        "target_inactivity_rate": 11.87,
         "charter_summary": _CHARTER.copy(),
-        "times_by_group": {
-            group: pd.DataFrame(rows, columns=[group, OPERATING_TIME, DOWNTIME])
-            for group, rows in _TIME_GROUPS.items()
-        },
+        "times_by_group": times_by_group,
         "amef": pd.DataFrame(_RISKS, columns=list(RISK_FIELDS)),
     }
 

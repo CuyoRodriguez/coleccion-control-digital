@@ -15,9 +15,10 @@ python -m streamlit run app.py --server.address localhost
 
 La página [Six Sigma](pages/10_Six_Sigma.py) se abre desde la barra lateral
 y los módulos de la página central. Incluye resumen del Project Charter,
-ahorro anual y delta frente a la meta, Pareto, tiempos apilados y Top 3 AMEF
+dos KPIs operativos diferenciados, Pareto, tiempos apilados y Top 3 AMEF
 en la pestaña **Análisis**. La pestaña **Soluciones y Control** reúne el
-impacto proyectado, las mejoras y el plan de sostenimiento.
+impacto proyectado, las acciones recomendadas del AMEF y el plan de control
+propuesto: el proyecto está en fase de análisis/propuesta, no de implementación medida.
 Su tema verde no cambia el de las otras páginas.
 
 El [módulo de datos](dmaic_data.py), fechado el 20 de noviembre de 2026,
@@ -28,10 +29,14 @@ Las funciones de carga y agregación usan `st.cache_data`; no leen archivos
 de datos ni requieren dependencias adicionales. Cada agrupación tiene su
 propio resumen: no se mezclan ni se suman ambos desgloses.
 No se actualiza automáticamente: cualquier cambio debe revisarse y publicarse
-sin incorporar datos personales. El ahorro calculado es $175,687.50 frente a $120,000 de meta base;
-no se fuerza el importe de la meta ni se cuentan totales duplicados.
+sin incorporar datos personales.
 Ambas agrupaciones conservan 4,470 minutos operativos y 915 de inactividad;
 el Top 3 AMEF conserva NPR inicial 720, 560 y 450.
+La muestra piloto de septiembre de 2026 (86 registros) tiene una tasa
+calculada de 16.99%: 915 minutos perdidos de 5,385 minutos totales.
+La línea base histórica semestral del Project Charter es 23.75%, con una
+meta CTQ reportada de 11.87% (-50%). Son referencias distintas; el CTQ
+histórico no se recalcula usando los minutos de la muestra piloto.
 
 Desde la raíz del portafolio, las [pruebas DMAIC](tests/test_dmaic_data.py)
 verifican agregaciones sintéticas, datos estáticos, caché aislada y navegación:
