@@ -29,7 +29,8 @@ from matplotlib.patches import Circle, Rectangle
 from assets.reporte_sg90 import informe_html, interfaz_grabacion
 from assets.trayectoria_hmi_sg90 import planificar_articular, planificar_recorrido
 from assets.control_vivo_sg90 import ControlVivoSG90
-from assets.hardware_sg90.reproducir_simulacion_sg90 import crear_trayectoria
+from assets.hardware_sg90.reproducir_simulacion_sg90 import ACEL_MAX_DEG_S2, VEL_MAX_DEG_S, crear_trayectoria
+from scripts.auditar_trayectoria_sg90 import figura_telemetria
 
 # =====================================================================
 # PARÁMETROS FÍSICOS Y CONSTANTES (idénticos al simulador de escritorio)
@@ -158,7 +159,8 @@ st.markdown('''
         .st-key-ribbon_sg90 [data-testid="stElementContainer"]:has(> [data-testid="stDownloadButton"]) {
             align-self: center;
         }
-        .st-key-ribbon_sg90 .st-key-abrir_hmi_sg90 [data-testid="stButton"] button {
+        .st-key-ribbon_sg90 .st-key-abrir_hmi_sg90 [data-testid="stButton"] button,
+        .st-key-ribbon_sg90 .st-key-calcular_exportacion [data-testid="stButton"] button {
             width: auto;
             min-width: 6rem;
             padding: 0.25rem 0.5rem !important;
@@ -2574,6 +2576,28 @@ def _zip_paquete_hw(trayectoria_json=None):
     return buf.getvalue()
 
 
+@st.cache_data
+def _png_telemetria(trayectoria_json):
+    figura, cumple = figura_telemetria(json.loads(trayectoria_json))
+    buf = io.BytesIO()
+    figura.savefig(buf, format='png', dpi=140)
+    return buf.getvalue(), cumple
+
+
+@st.dialog('Telemetría de la trayectoria · SG90', width='large')
+def _mostrar_telemetria():
+    png, cumple = _png_telemetria(trayectoria_robot_json)
+    st.caption(f'Posición, velocidad y aceleración de q₁ y q₂ calculadas de las consignas exportadas · {resumen_tiempo_robot}. '
+               'Son diferencias discretas de lo que se enviará al robot, no una medición física.')
+    if cumple:
+        st.success(f'Dentro de los límites: ±{VEL_MAX_DEG_S:g} °/s y ±{ACEL_MAX_DEG_S2:g} °/s².')
+    else:
+        st.error('La trayectoria supera al menos un límite de velocidad o aceleración.')
+    st.image(png, width='stretch')
+    st.download_button('Descargar PNG', png, file_name='telemetria_sg90.png', mime='image/png',
+                       key='descargar_telemetria')
+
+
 @st.dialog('Guía del robot SG90', width='large')
 def _mostrar_guia_robot(tema):
     st.caption('Cierra con la ×, la tecla Esc o haciendo clic fuera del cuadro.')
@@ -2871,9 +2895,9 @@ with tab_asistencia:
 
 with tab_codigo:
     with st.container(key='codigo_robot_ribbon'):
-        descargas, asistencia, instrucciones = st.columns([1.4, 0.6, 3])
+        descargas, asistencia, instrucciones = st.columns([1.85, 0.6, 2.55])
         with descargas:
-            c_ino, c_py, c_zip = st.columns(3)
+            c_ino, c_py, c_zip, c_tel = st.columns(4)
             with c_ino:
                 st.download_button('⚙', _leer_hw('brazo_sg90.ino'),
                                    file_name='brazo_sg90.ino', mime='text/plain', use_container_width=False,
@@ -2889,6 +2913,12 @@ with tab_codigo:
                                    file_name='brazo_sg90_export.zip', mime='application/zip', use_container_width=False,
                                    help='Exportar Arduino, reproductor USB y las muestras simuladas con tiempos limitados.')
                 st.caption('Exportar trayectoria + Arduino' if trayectoria_robot_json else 'Paquete sin trayectoria')
+            with c_tel:
+                if st.button('📈', key='ver_telemetria', disabled=not trayectoria_robot_json,
+                             help='Graficar posición, velocidad y aceleración de q₁ y q₂ con los límites del SG90.'
+                             if trayectoria_robot_json else error_trayectoria_robot):
+                    _mostrar_telemetria()
+                st.caption('Telemetría')
             st.caption('Descargas')
         with asistencia:
             with st.container():

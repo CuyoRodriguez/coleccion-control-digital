@@ -212,6 +212,7 @@ class ExportacionTests(unittest.TestCase):
             app = AppTest.from_file(str(RAIZ / 'app.py'), default_timeout=120).run()
             app.switch_page('pages/8_Simulador_Brazo_SG90.py').run()
             self.assertTrue(app.button('ejecutar_robot_usb').disabled)
+            self.assertTrue(app.button('ver_telemetria').disabled)
             self.assertNotIn('brazo_sg90_export/hardware/trayectoria.json', archivos)
             app.selectbox[1].select('Cinemático').run()
             app.radio('modo_interaccion_secuencia').set_value('Precisión Manual (Coordenadas)').run()
@@ -219,6 +220,9 @@ class ExportacionTests(unittest.TestCase):
             app.slider('velocidad_reproduccion').set_value(2.0).run()
             app.button('calcular_exportacion').click().run()
             self.assertFalse(app.exception)
+            app.button('ver_telemetria').click().run()
+            self.assertFalse(app.exception)
+            self.assertTrue(any('Dentro de los límites' in s.value for s in app.success))
             contenido = archivos['brazo_sg90_export/hardware/trayectoria.json']
             datos = validar_trayectoria(json.loads(contenido))
             self.assertEqual(datos['version'], 2)

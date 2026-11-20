@@ -52,6 +52,9 @@ python -m streamlit run app.py --server.address localhost
   python -m scripts.auditar_trayectoria_sg90 "C:\ruta\hardware\trayectoria.json"
   python -m scripts.auditar_trayectoria_sg90 "C:\ruta\hardware\trayectoria.json" --grafica telemetria.png
   ```
+  En la página, después de **Simular para exportar**, el botón **📈
+  Telemetría** de la pestaña **Código del robot** muestra la misma gráfica y
+  permite descargar el PNG.
   Con `--grafica` se guardan las tres curvas de q₁ y q₂ con los límites de
   40 °/s y 120 °/s², y el comando devuelve un error si alguna muestra queda
   fuera. Para marcar esquinas, añade `--vertice N` por cada número de muestra
