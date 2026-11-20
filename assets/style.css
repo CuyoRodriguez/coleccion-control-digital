@@ -10,7 +10,7 @@
 
 html,
 body,
-[class*="st-"] {
+[class*="st-"]:not([data-testid="stIconMaterial"]) {
   font-family: "Inter", "Segoe UI", sans-serif;
 }
 

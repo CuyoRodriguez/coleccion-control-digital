@@ -20,6 +20,8 @@ en la pestaña **Análisis**. La pestaña **Soluciones y Control** reúne el
 impacto proyectado, las acciones recomendadas del AMEF y el plan de control
 propuesto: el proyecto está en fase de análisis/propuesta, no de implementación medida.
 Su tema verde no cambia el de las otras páginas.
+La tipografía global respeta la fuente nativa de iconos de Streamlit para
+que las flechas de desplegables y barra lateral no aparezcan como texto.
 
 El [módulo de datos](dmaic_data.py), fechado el 20 de noviembre de 2026,
 contiene solo agregados estáticos autorizados y etiquetas
