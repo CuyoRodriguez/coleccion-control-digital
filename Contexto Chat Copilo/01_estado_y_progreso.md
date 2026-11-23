@@ -31,7 +31,7 @@ y `modelos_rl_2dof/`. Para volver a verlos en Git, quita esas líneas del archiv
 
 - [x] Simulador con rutas (recta, triángulo, puntos, curvas) y Teach Pendant/HMI.
 - [x] Perfil suave quíntico (forma de "S") que frena a velocidad cero en cada vértice.
-- [x] Límites seguros: **40 °/s** y **120 °/s²**, verificados con el auditor.
+- [x] Límites nominales de diseño: **40 °/s** y **120 °/s²**; no certifican seguridad física.
 - [x] Exportación **JSON v2 en microsegundos** (compatible con el JSON v1 en grados).
 - [x] Firmware Arduino + PCA9685 con protocolo `US` (compila: 8,846 B flash, 471 B RAM).
 - [x] Script de reproducción por USB con verificación de ACK y corte por retraso.
@@ -39,14 +39,22 @@ y `modelos_rl_2dof/`. Para volver a verlos en Git, quita esas líneas del archiv
 - [x] Medición de la punta en video (OpenCV) con corrección de perspectiva.
 - [x] Comparador teórico vs. real: error sincronizado y geométrico en mm + gráfica.
 - [x] Botón 📈 Telemetría en la página (tras "Simular para exportar").
-- [x] 31 pruebas automáticas pasando.
-- [ ] **Cargar el firmware** a un Arduino real (nunca se ha hecho).
+- [x] Exportación `.ino` autónoma: tabla en Flash y calibración configurable.
+- [x] 33 pruebas SG90 aprobadas en la copia web durante la preparación de esta publicación.
+- [ ] Confirmar carga y validación física del firmware actual en un Arduino real.
 - [ ] **Calibrar** cada servo (90° del programa = 90° real; topes seguros).
 - [ ] **Primera prueba física**: recta lenta sin pluma.
 - [ ] **Video real** con celular → medir → comparar → ajustar HSV/área mínima.
 - [ ] Revisar si el celular graba con **fps variable** (afectaría `tiempo_s`).
 
 ## En qué nos quedamos
+
+El `.ino` autónomo arranca sin conocer la pose real. La interpolación y el
+reescalado pueden modificar el recorrido y su duración; los límites son
+nominales en lazo abierto. El firmware USB sigue incluido en el ZIP.
+El usuario reportó movimiento con una versión anterior modificada, con fallas
+externas; no hay mediciones registradas ni validación del firmware actual.
+Ver [arquitectura SG90](./02_arquitectura_sg90_2gdl.md).
 
 1. Se publicó la v0.7 (botón de telemetría + esta carpeta) y el repositorio quedó limpio.
 2. Se redactó una guía para que los compañeros graben videos de prueba

@@ -30,6 +30,7 @@ from assets.reporte_sg90 import informe_html, interfaz_grabacion
 from assets.trayectoria_hmi_sg90 import planificar_articular, planificar_recorrido
 from assets.control_vivo_sg90 import ControlVivoSG90
 from assets.hardware_sg90.reproducir_simulacion_sg90 import ACEL_MAX_DEG_S2, VEL_MAX_DEG_S, crear_trayectoria
+from helpers.exportacion_autonoma_sg90 import generar_autonomo
 from scripts.auditar_trayectoria_sg90 import figura_telemetria
 
 # =====================================================================
@@ -2620,6 +2621,12 @@ def _mostrar_guia_robot(tema):
             'El ejemplo de firmware usa 1000–2000 µs, no presupone que 500–2400 µs sea seguro. '
             'Sustituye `COM3` por tu puerto.'
         )
+        st.info(
+            'El botón Arduino autónomo genera otro sketch con la trayectoria en Flash y arranque automático. '
+            'Configura su calibración antes de exportar. El primer pulso se aplica sin conocer la pose real; '
+            'el temporizador y los límites son nominales y no garantizan la respuesta del servo. '
+            'Una trama serial válida toma el control y detiene la reproducción autónoma hasta reiniciar.'
+        )
         st.code(
             'python -m pip install pyserial\n'
             'cd brazo_sg90_export\\hardware\n'
@@ -2894,15 +2901,33 @@ with tab_asistencia:
 
 
 with tab_codigo:
+    with st.expander('Calibración del .ino autónomo (valores nominales, no verificados)'):
+        st.caption('Introduce la calibración real antes de usar el robot. Cambiarla requiere volver a exportar.')
+        calibracion_autonoma = []
+        for articulacion in ('Hombro', 'Codo'):
+            columnas_cal = st.columns(4)
+            offset = columnas_cal[0].number_input(f'{articulacion} offset °', -180, 360, 0)
+            signo = columnas_cal[1].selectbox(f'{articulacion} signo', (1, -1))
+            minimo = columnas_cal[2].number_input(f'{articulacion} mínimo µs', 500, 2499, 1000)
+            maximo = columnas_cal[3].number_input(f'{articulacion} máximo µs', 501, 2500, 2000)
+            calibracion_autonoma.append((offset, signo, minimo, maximo))
+    sketch_autonomo, info_autonomo, error_autonomo = None, None, error_trayectoria_robot
+    if datos_robot:
+        try:
+            sketch_autonomo, info_autonomo = generar_autonomo(datos_robot, tuple(calibracion_autonoma))
+            error_autonomo = None
+        except ValueError as exc:
+            error_autonomo = str(exc)
     with st.container(key='codigo_robot_ribbon'):
         descargas, asistencia, instrucciones = st.columns([1.85, 0.6, 2.55])
         with descargas:
             c_ino, c_py, c_zip, c_tel = st.columns(4)
             with c_ino:
-                st.download_button('⚙', _leer_hw('brazo_sg90.ino'),
-                                   file_name='brazo_sg90.ino', mime='text/plain', use_container_width=False,
-                                   help='Descargar firmware .ino. Abrir en Arduino IDE dentro de una carpeta llamada brazo_sg90.')
-                st.caption('Firmware sin trayectoria')
+                st.download_button('⚙', sketch_autonomo or '',
+                                   file_name='brazo_sg90_autonomo.ino', mime='text/plain', use_container_width=False,
+                                   disabled=sketch_autonomo is None,
+                                   help='Descargar el sketch autónomo con trayectoria.' if sketch_autonomo else error_autonomo)
+                st.caption('Arduino autónomo')
             with c_py:
                 st.download_button('🐍', _leer_hw('enviar_trayectoria_sg90.py'),
                                    file_name='enviar_trayectoria_sg90.py', mime='text/x-python', use_container_width=False,
@@ -2929,6 +2954,17 @@ with tab_codigo:
         with instrucciones:
             if trayectoria_robot_json:
                 st.caption(f'Trayectoria incluida · {resumen_tiempo_robot}')
+                if error_autonomo:
+                    st.error(f'No se puede generar el .ino autónomo: {error_autonomo}')
+                elif info_autonomo:
+                    st.caption(
+                        f'Autónomo: {info_autonomo["muestras"]} muestras · '
+                        f'{info_autonomo["bytes_tabla"]} bytes de tabla · '
+                        f'{info_autonomo["duracion_s"]:.3f} s · escala temporal {info_autonomo["escala"]:.3f}.'
+                    )
+                    if info_autonomo['escala'] > 1.000001:
+                        logging.warning('Exportacion autonoma SG90: escala temporal %.6f', info_autonomo['escala'])
+                        st.warning('La trayectoria autónoma se ralentizó para respetar los límites nominales.')
             else:
                 st.info(error_trayectoria_robot)
                 if st.button('Simular para exportar', key='calcular_exportacion',

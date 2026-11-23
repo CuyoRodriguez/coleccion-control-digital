@@ -3,6 +3,7 @@
 import io
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -18,6 +19,8 @@ from assets.control_vivo_sg90 import ControlVivoSG90
 from assets.hardware_sg90.reproducir_simulacion_sg90 import (
     ACEL_MAX_DEG_S2, VEL_MAX_DEG_S, crear_trayectoria, reproducir, validar_trayectoria,
 )
+from assets.trayectoria_hmi_sg90 import planificar_articular
+from helpers.exportacion_autonoma_sg90 import generar_autonomo
 from scripts.auditar_trayectoria_sg90 import error_tcp_mm, figura_telemetria, picos
 from scripts.comparar_trayectorias_sg90 import comparar
 
@@ -199,6 +202,56 @@ class ReproduccionTests(unittest.TestCase):
 
 
 class ExportacionTests(unittest.TestCase):
+    def test_autonomo_remuestrea_trayectoria_real_con_final_y_pasos_seguros(self):
+        inicio = np.radians([90, 90])
+        ruta = planificar_articular(inicio, [np.radians([110, 75])], 60, 0.02)
+        datos = crear_trayectoria([{'q': q} for q in ruta], inicio, 0.02, 1, 'Cinemático')
+        sketch, info = generar_autonomo(datos)
+        tablas = []
+        for eje in (1, 2):
+            cuerpo = re.search(rf'trayectoria{eje}\[\] PROGMEM = \{{(.*?)\}};', sketch, re.S)
+            self.assertIsNotNone(cuerpo)
+            tablas.append([int(x) for x in re.findall(r'\d+', cuerpo.group(1))])
+        pulsos = np.asarray(tablas).T
+        self.assertEqual(len(pulsos), info['muestras'])
+        self.assertEqual(info['bytes_tabla'], 4 * len(pulsos))
+        self.assertEqual(len(pulsos), round(info['duracion_s'] / 0.02) + 1)
+        np.testing.assert_array_equal(pulsos[0], datos['inicio_us'])
+        np.testing.assert_array_equal(pulsos[-1], datos['muestras_us'][-1])
+        self.assertTrue(np.all((pulsos >= 1028) & (pulsos <= 1944)))
+        self.assertLessEqual(np.max(np.abs(np.diff(pulsos, axis=0))), 20)
+        self.assertLessEqual(info['velocidad_nominal'], VEL_MAX_DEG_S + 1e-8)
+        self.assertLessEqual(info['aceleracion_nominal'], ACEL_MAX_DEG_S2 + 1e-8)
+        self.assertNotIn('sinf(', sketch)
+        self.assertIn('pgm_read_word', sketch)
+
+    def test_autonomo_reescala_y_aplica_calibracion(self):
+        datos = dict(version=2, periodo_s=0.03, inicio_us=[1500, 1500],
+                     muestras_us=[[1600, 1400]])
+        sketch, info = generar_autonomo(datos, ((180, -1, 1000, 2000), (0, 1, 1100, 1900)))
+        self.assertGreater(info['escala'], 1)
+        self.assertGreater(info['duracion_s'], info['duracion_original_s'])
+        self.assertIn('{180, -1, 1000, 2000}', sketch)
+        self.assertIn('{0, 1, 1100, 1900}', sketch)
+        self.assertLessEqual(info['velocidad_nominal'], VEL_MAX_DEG_S + 1e-8)
+        self.assertLessEqual(info['aceleracion_nominal'], ACEL_MAX_DEG_S2 + 1e-8)
+        with self.assertRaisesRegex(ValueError, 'Calibracion invalida'):
+            generar_autonomo(datos, ((0, 1, 2000, 1000), (0, 1, 1000, 2000)))
+
+    def test_autonomo_incluye_extremo_en_siguiente_tick(self):
+        datos = dict(version=2, periodo_s=0.031, inicio_us=[1500, 1500],
+                     muestras_us=[[1500, 1500], [1500, 1500]])
+        _, info = generar_autonomo(datos)
+        self.assertAlmostEqual(info['duracion_original_s'], 0.062)
+        self.assertAlmostEqual(info['duracion_s'], 0.08)
+        self.assertEqual(info['muestras'], 5)
+
+    def test_autonomo_rechaza_trayectorias_que_no_caben(self):
+        datos = dict(version=2, periodo_s=100, inicio_us=[1500, 1500],
+                     muestras_us=[[1500, 1500]])
+        with self.assertRaisesRegex(ValueError, 'demasiado larga'):
+            generar_autonomo(datos)
+
     def test_zip_extraido_reproduce_cuadros_web_y_detecta_edicion_pendiente(self):
         archivos = {}
         original = zipfile.ZipFile.writestr
@@ -208,7 +261,8 @@ class ExportacionTests(unittest.TestCase):
             return original(archivo_zip, nombre, datos, *args, **kwargs)
 
         st.cache_data.clear()
-        with patch.object(zipfile.ZipFile, 'writestr', autospec=True, side_effect=escribir):
+        with patch.object(zipfile.ZipFile, 'writestr', autospec=True, side_effect=escribir), \
+                patch('helpers.exportacion_autonoma_sg90.generar_autonomo', wraps=generar_autonomo) as generar:
             app = AppTest.from_file(str(RAIZ / 'app.py'), default_timeout=120).run()
             app.switch_page('pages/8_Simulador_Brazo_SG90.py').run()
             self.assertTrue(app.button('ejecutar_robot_usb').disabled)
@@ -220,6 +274,8 @@ class ExportacionTests(unittest.TestCase):
             app.slider('velocidad_reproduccion').set_value(2.0).run()
             app.button('calcular_exportacion').click().run()
             self.assertFalse(app.exception)
+            self.assertTrue(generar.called)
+            self.assertTrue(any('bytes de tabla' in c.value for c in app.caption))
             app.button('ver_telemetria').click().run()
             self.assertFalse(app.exception)
             self.assertTrue(any('Dentro de los límites' in s.value for s in app.success))

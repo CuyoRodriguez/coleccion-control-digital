@@ -67,6 +67,34 @@ scripts/comparar_trayectorias_sg90.py → error en mm + gráfica
 
 `inicio_deg` y `muestras_deg` en grados enteros. Sigue siendo compatible.
 
+## Exportación autónoma
+
+El botón `.ino` genera `brazo_sg90_autonomo.ino` a partir del JSON v2; el
+firmware USB original permanece en el ZIP. La página permite ajustar offset,
+signo y pulsos por servo antes de generar la tabla. Los valores iniciales son
+nominales, no una calibración física.
+
+El exportador interpola las articulaciones mediante cúbicas Hermite monótonas
+con velocidad cero en los extremos; pueden diferir de la trayectoria
+quintica original entre muestras. Escala uniformemente el tiempo si los
+picos continuos nominales superan 40 °/s o 120 °/s² y comprueba cambios de
+hasta 20 µs por ciclo tras cuantizar. La tabla incluye inicio y final: N+1
+muestras para N intervalos. Si el final no coincide con un tick, se aplica
+en el siguiente. La página muestra la duración, escala y bytes de tabla;
+se rechazan más de 3500 muestras para reservar Flash.
+
+El sketch arranca automáticamente, pausa 2 s al terminar y, si está activada
+la repetición, regresa con un perfil quíntico y espera 1 s. Una trama serial
+válida cede el control al puerto y termina el ciclo autónomo hasta reiniciar.
+Ante retraso, paso excesivo o fallo PWM la secuencia se detiene. Los 20 ms
+son nominales, no están sincronizados en fase con el PCA9685 y no garantizan
+un plazo físico. El ACK no confirma movimiento.
+
+La primera orden se aplica sin conocer la pose real; la cuantización y el
+servo impiden deducir límites físicos de los cálculos nominales. Confirmar
+calibración, topes, alimentación, pose y zona despejada antes de usarlo;
+detener la secuencia no corta la alimentación.
+
 ## Enlace serial (`assets/control_vivo_sg90.py`)
 
 - Clase `ControlVivoSG90`. Acepta los saludos `LISTO` (legado) y `LISTO US2`.

@@ -1,0 +1,214 @@
+// Trayectoria autonoma SG90: limites nominales en lazo abierto, requieren calibracion fisica.
+// La primera orden aplica la pose inicial sin conocer la posicion real.
+// El PCA9685 cuantiza los pulsos; la respuesta fisica no esta garantizada.
+#include <Wire.h>
+#include <Adafruit_PWMServoDriver.h>
+#include <avr/pgmspace.h>
+
+const bool MODO_AUTONOMO = true;
+const bool REPETIR_CICLO = true;
+const unsigned long PERIODO_MS = 20;
+const int PASO_MAX_US = 20;
+const uint16_t NUM_PASOS = @NUM_PASOS@;
+const uint16_t trayectoria1[] PROGMEM = {
+@TABLA_1@
+};
+const uint16_t trayectoria2[] PROGMEM = {
+@TABLA_2@
+};
+const unsigned long PASOS_RETORNO = @PASOS_RETORNO@UL;
+
+struct Calibracion { int offset; int signo; int minimo; int maximo; };
+const Calibracion calibracion[2] = {{@CALIBRACION_1@}, {@CALIBRACION_2@}};
+Adafruit_PWMServoDriver pwm(0x40);
+enum Estado { REPRODUCIENDO, PAUSA_FINAL, RETORNANDO_INICIO, PAUSA_INICIO, CONTROL_SERIAL, DETENIDO };
+Estado estado = DETENIDO;
+bool pwmListo = false;
+bool posicionEscrita = false;
+bool fallo = false;
+int actual[2], objetivo[2], inicioRetorno[2];
+uint16_t indice = 0;
+unsigned long pasoRetorno = 0, ultimo = 0, inicioPausa = 0;
+char buffer[20];
+byte n = 0;
+bool desbordado = false;
+
+int muestra(byte eje, uint16_t i) {
+  return eje == 0 ? pgm_read_word(&trayectoria1[i]) : pgm_read_word(&trayectoria2[i]);
+}
+
+void detener(const __FlashStringHelper *motivo) {
+  estado = DETENIDO;
+  fallo = true;
+  Serial.println(motivo);
+}
+
+bool escribir(int a, int b) {
+  if (posicionEscrita && (abs(a - actual[0]) > PASO_MAX_US || abs(b - actual[1]) > PASO_MAX_US)) {
+    detener(F("ERR PASO"));
+    return false;
+  }
+  const int valores[2] = {a, b};
+  for (byte i = 0; i < 2; ++i) {
+    if (valores[i] < calibracion[i].minimo || valores[i] > calibracion[i].maximo) {
+      detener(F("ERR RANGO"));
+      return false;
+    }
+    uint16_t tick = ((unsigned long)valores[i] * 4096UL * 50UL + 500000UL) / 1000000UL;
+    if (pwm.setPWM(i, 0, tick) != 0) {
+      pwmListo = false;
+      detener(F("ERR PWM"));
+      return false;
+    }
+  }
+  actual[0] = a;
+  actual[1] = b;
+  posicionEscrita = true;
+  return true;
+}
+
+bool leerEntero(const char *s, char fin, int maximo, int &valor, const char *&sig) {
+  if (*s < '0' || *s > '9') return false;
+  valor = 0;
+  for (; *s >= '0' && *s <= '9'; ++s) {
+    long siguiente = valor * 10L + (*s - '0');
+    if (siguiente > maximo) return false;
+    valor = static_cast<int>(siguiente);
+  }
+  if (*s != fin) return false;
+  sig = s + 1;
+  return true;
+}
+
+int calibrar(byte eje, int nominalUs) {
+  const Calibracion &c = calibracion[eje];
+  long anguloMil = (long)c.offset * 1000L + (long)c.signo * (nominalUs - 1000) * 180L;
+  if (anguloMil < 0 || anguloMil > 180000L) return -1;
+  return c.minimo + (anguloMil * (c.maximo - c.minimo) + 90000L) / 180000L;
+}
+
+void procesarLinea() {
+  buffer[n] = '\0';
+  bool enUs = strncmp(buffer, "US ", 3) == 0;
+  int a, b;
+  const char *resto;
+  int maximo = enUs ? 1944 : 180;
+  if (!leerEntero(buffer + (enUs ? 3 : 0), ',', maximo, a, resto) ||
+      !leerEntero(resto, '\0', maximo, b, resto) ||
+      (enUs && (a < 1028 || b < 1028))) {
+    Serial.println(F("ERR"));
+    return;
+  }
+  if (!pwmListo) {
+    Serial.println(F("ERR PWM"));
+    return;
+  }
+  if (fallo) {
+    Serial.println(F("ERR DETENIDO"));
+    return;
+  }
+  int nominal1 = enUs ? a : 1000 + constrain(a, 5, 170) * 1000L / 180;
+  int nominal2 = enUs ? b : 1000 + constrain(b, 5, 170) * 1000L / 180;
+  int destino1 = calibrar(0, nominal1), destino2 = calibrar(1, nominal2);
+  if (destino1 < 0 || destino2 < 0) {
+    Serial.println(F("ERR RANGO"));
+    return;
+  }
+  objetivo[0] = destino1;
+  objetivo[1] = destino2;
+  if (!posicionEscrita && !escribir(destino1, destino2)) return;
+  if (estado != CONTROL_SERIAL) ultimo = millis();
+  estado = CONTROL_SERIAL;
+  Serial.print(F("OK "));
+  if (enUs) Serial.print(F("US "));
+  Serial.print(a);
+  Serial.print(',');
+  Serial.println(b);
+}
+
+void setup() {
+  Serial.begin(115200);
+  if (!pwm.begin()) {
+    detener(F("ERR PWM"));
+    return;
+  }
+  if (pwm.setPWM(0, 0, 4096) != 0 || pwm.setPWM(1, 0, 4096) != 0) {
+    detener(F("ERR PWM"));
+    return;
+  }
+  pwm.setPWMFreq(50);
+  pwmListo = true;
+  Serial.println(F("LISTO US2"));
+  if (MODO_AUTONOMO && escribir(muestra(0, 0), muestra(1, 0))) {
+    indice = 1;
+    estado = REPRODUCIENDO;
+    ultimo = millis();
+  }
+}
+
+void loop() {
+  for (byte procesados = 0; procesados < 24 && Serial.available() > 0; ++procesados) {
+    char c = Serial.read();
+    if (c == '\n') {
+      if (desbordado) Serial.println(F("ERR"));
+      else if (n > 0) procesarLinea();
+      n = 0;
+      desbordado = false;
+    } else if (c != '\r') {
+      if (n < sizeof(buffer) - 1) buffer[n++] = c;
+      else desbordado = true;
+    }
+  }
+  unsigned long ahora = millis();
+  if (!pwmListo || estado == DETENIDO) return;
+  if (estado == PAUSA_FINAL) {
+    if (REPETIR_CICLO && ahora - inicioPausa >= 2000) {
+      inicioRetorno[0] = actual[0];
+      inicioRetorno[1] = actual[1];
+      pasoRetorno = 0;
+      estado = (actual[0] == muestra(0, 0) && actual[1] == muestra(1, 0))
+               ? PAUSA_INICIO : RETORNANDO_INICIO;
+      inicioPausa = ahora;
+      ultimo = ahora;
+    }
+    return;
+  }
+  if (estado == PAUSA_INICIO) {
+    if (ahora - inicioPausa >= 1000) {
+      indice = 1;
+      estado = REPRODUCIENDO;
+      ultimo = ahora;
+    }
+    return;
+  }
+  if (ahora - ultimo < PERIODO_MS) return;
+  if (ahora - ultimo >= 2 * PERIODO_MS) {
+    detener(F("ERR RETRASO"));
+    return;
+  }
+  ultimo = ahora;
+  if (estado == REPRODUCIENDO) {
+    if (indice < NUM_PASOS && !escribir(muestra(0, indice), muestra(1, indice))) return;
+    ++indice;
+    if (indice >= NUM_PASOS) {
+      estado = PAUSA_FINAL;
+      inicioPausa = ahora;
+    }
+  } else if (estado == RETORNANDO_INICIO) {
+    ++pasoRetorno;
+    float u = (float)pasoRetorno / PASOS_RETORNO;
+    if (u > 1.0f) u = 1.0f;
+    float s = u * u * u * (10.0f + u * (-15.0f + 6.0f * u));
+    int a = lroundf(inicioRetorno[0] + s * (muestra(0, 0) - inicioRetorno[0]));
+    int b = lroundf(inicioRetorno[1] + s * (muestra(1, 0) - inicioRetorno[1]));
+    if (!escribir(a, b)) return;
+    if (pasoRetorno >= PASOS_RETORNO) {
+      estado = PAUSA_INICIO;
+      inicioPausa = ahora;
+    }
+  } else if (estado == CONTROL_SERIAL) {
+    int a = actual[0] + constrain(objetivo[0] - actual[0], -PASO_MAX_US, PASO_MAX_US);
+    int b = actual[1] + constrain(objetivo[1] - actual[1], -PASO_MAX_US, PASO_MAX_US);
+    escribir(a, b);
+  }
+}
