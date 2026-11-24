@@ -118,6 +118,32 @@ class TeachPendantSG90Tests(unittest.TestCase):
         self.assertEqual(self.app.session_state['secuencia_operacional'], [])
         self.assertEqual(self.app.session_state['cuadros'], [])
 
+    def test_comparador_muestra_kpi_y_tres_controladores_sin_alterar_trayectoria(self):
+        self.coordenadas(-80, 110)
+        self.pulsar('hmi_agregar')
+        self.pulsar('hmi_ejecutar')
+        poses = np.asarray([c['q'].copy() for c in self.app.session_state['cuadros']])
+        self.assertEqual(len(self.app.get('progress')), 1)
+        self.assertTrue(any('de criterios cumplidos' in p.proto.text for p in self.app.get('progress')))
+        self.assertTrue(any('Error final:' in m.value for m in self.app.markdown))
+        self.app.button('comparar_controladores_sg90').click().run()
+        self.assertFalse(self.app.exception)
+        tablas = [d.value for d in self.app.dataframe if 'Controlador' in d.value.columns]
+        self.assertEqual(list(tablas[-1]['Controlador']), ['Cinemático', 'PID', 'PID + Feedforward'])
+        self.assertTrue(any('Ver gráficas de comparación' == e.label for e in self.app.expander))
+        np.testing.assert_array_equal(np.asarray([c['q'] for c in self.app.session_state['cuadros']]), poses)
+        next(slider for slider in self.app.slider if slider.label == 'Kp').set_value(0.03).run()
+        self.assertFalse(self.app.exception)
+        self.assertTrue(self.app.button('comparar_controladores_sg90').disabled)
+        self.assertFalse(any('Controlador' in d.value.columns for d in self.app.dataframe))
+        self.assertEqual(len(self.app.get('progress')), 0)
+
+    def test_comparador_exige_trayectoria_calculada(self):
+        self.assertFalse(self.app.exception)
+        self.assertTrue(self.app.button('comparar_controladores_sg90').disabled)
+        self.assertTrue(any('Sin puntos' in w.value for w in self.app.info))
+        self.assertEqual(len(self.app.get('progress')), 0)
+
     def test_curvas_soldadura_y_reposo_comparten_secuencia(self):
         self.actualizar(self.app.toggle('hmi_curvas').set_value(True))
         for punto in ((-70, 120), (0, 140)):

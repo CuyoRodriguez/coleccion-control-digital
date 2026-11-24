@@ -30,7 +30,9 @@ from assets.reporte_sg90 import informe_html, interfaz_grabacion
 from assets.trayectoria_hmi_sg90 import planificar_articular, planificar_recorrido
 from assets.control_vivo_sg90 import ControlVivoSG90
 from assets.hardware_sg90.reproducir_simulacion_sg90 import ACEL_MAX_DEG_S2, VEL_MAX_DEG_S, crear_trayectoria
+from helpers.comparador_control_sg90 import TOLERANCIA_FINAL_MM, comparar_controladores, metricas_control
 from helpers.exportacion_autonoma_sg90 import generar_autonomo
+from helpers.trajectory_validation_helper import motivo_rechazo_trayectoria
 from scripts.auditar_trayectoria_sg90 import figura_telemetria
 
 # =====================================================================
@@ -1291,6 +1293,7 @@ st.markdown("""
 with fila1[0]:
     st.markdown('## Laboratorio de Control Digital · Brazo 2-DOF SG90')
     ui_grafica_robot = st.empty()
+    panel_evaluacion = st.container(border=True, key='evaluacion_control_sg90')
 
 # ---- Columna derecha: resumen matemático y métricas ----
 with fila1[1]:
@@ -2378,6 +2381,21 @@ with slot_metricas:
     waypoints_metricas = waypoints_operacionales()
     secuencia = st.session_state.secuencia_operacional
     cuadros_metricas = cuadros
+    rechazo_kpi = motivo_rechazo_trayectoria(
+        secuencia=secuencia, tipo_reposo=ESTADO_REPOSO, cantidad_cuadros=len(cuadros),
+        indice_secuencia=st.session_state.indice_secuencia, firma_actual=firma_robot,
+        firma_calculada=st.session_state.get('robot_firma_calculada'),
+        contexto_actual=contexto_robot, contexto_calculado=st.session_state.get('robot_contexto_calculado'),
+    )
+    kpi = None
+    if rechazo_kpi is None:
+        try:
+            kpi = metricas_control(
+                st.session_state.robot_inicio_calculado,
+                [c['q'] for c in cuadros], [c['q_d'] for c in cuadros], dt, ruta_efector,
+            )
+        except ValueError as exc:
+            st.error(f'No se pudo calcular el indicador de éxito: {exc}')
     if len(secuencia) == 1 and secuencia[0]['tipo'] == ESTADO_SOLDADURA:
         indice_inicio_pasada = next(
             (i for i, cuadro in enumerate(cuadros) if cuadro.get('soldadura_activa')),
@@ -2514,15 +2532,15 @@ def _leer_hw(nombre):
 
 
 def _trayectoria_robot_actual():
-    if not st.session_state.secuencia_operacional:
-        return None, 'Sin puntos: usa Control HMI para el mando manual o agrega waypoints a la gráfica.'
-    if any(s['tipo'] == ESTADO_REPOSO for s in st.session_state.secuencia_operacional):
-        return None, 'Reposo es una pausa interactiva sin duración. Retírala antes de exportar o enviar una trayectoria temporizada.'
-    if (not cuadros or st.session_state.indice_secuencia != len(st.session_state.secuencia_operacional)
-            or st.session_state.get('robot_firma_calculada') != firma_robot):
-        return None, 'Primero calcula la secuencia completa. Simular trayectoria recalcula desde el inicio si cambiaste puntos o controlador.'
-    if st.session_state.get('robot_contexto_calculado') != contexto_robot:
-        return None, 'Los cuadros mezclan configuraciones de control. Reinicia y simula toda la secuencia de nuevo.'
+    rechazo = motivo_rechazo_trayectoria(
+        secuencia=st.session_state.secuencia_operacional,
+        tipo_reposo=ESTADO_REPOSO, cantidad_cuadros=len(cuadros),
+        indice_secuencia=st.session_state.indice_secuencia, firma_actual=firma_robot,
+        firma_calculada=st.session_state.get('robot_firma_calculada'),
+        contexto_actual=contexto_robot, contexto_calculado=st.session_state.get('robot_contexto_calculado'),
+    )
+    if rechazo is not None:
+        return None, rechazo
     try:
         datos = crear_trayectoria(
             cuadros, st.session_state.robot_inicio_calculado, dt, multiplicador_velocidad, modo,
@@ -2539,6 +2557,90 @@ if datos_robot:
     ritmo_robot = (' · limitado por velocidad/aceleración'
                    if periodo_robot > dt / multiplicador_velocidad else ' · mismo ritmo que la animación')
     resumen_tiempo_robot = f'{len(cuadros)} muestras · {len(cuadros) * periodo_robot:.2f} s{ritmo_robot}'
+
+
+def _mostrar_comparador_control(resultados):
+    st.caption(
+        'Misma pose inicial desde reposo, referencia, periodo de simulación y ganancias. '
+        'Cinemático sigue la referencia idealmente; los otros modos integran dinámica. '
+        'El éxito exige error final ≤ 5 mm, velocidad ≤ 40 °/s y aceleración ≤ 120 °/s². '
+        'Son diferencias discretas con reposo supuesto en los extremos, no límites físicos verificados.'
+    )
+    st.dataframe([
+        {
+            'Controlador': nombre,
+            'Éxito': 'Sí' if r['exito'] else 'No',
+            'Error final (mm)': round(r['error_final'], 2),
+            'Error medio (mm)': round(r['error_medio'], 2),
+            'Velocidad máx. (°/s)': round(r['vel_max'], 2),
+            'Aceleración máx. (°/s²)': round(r['acel_max'], 2),
+        }
+        for nombre, r in resultados.items()
+    ], hide_index=True)
+    figura_xy = go.Figure()
+    xy_ref = next(iter(resultados.values()))['xy_ref']
+    figura_xy.add_trace(go.Scatter(x=xy_ref[:, 0], y=xy_ref[:, 1], name='Referencia',
+                                   line=dict(dash='dash', color='gray')))
+    figura_error = go.Figure()
+    tiempo = np.arange(1, len(xy_ref) + 1) * dt
+    for nombre, resultado in resultados.items():
+        xy = resultado['xy']
+        figura_xy.add_trace(go.Scatter(x=xy[:, 0], y=xy[:, 1], name=nombre))
+        figura_error.add_trace(go.Scatter(x=tiempo, y=resultado['error'], name=nombre))
+    figura_xy.update_layout(title='Trayectoria del efector', xaxis_title='X (mm)', yaxis_title='Y (mm)')
+    figura_xy.update_yaxes(scaleanchor='x', scaleratio=1)
+    figura_error.update_layout(title='Error cartesiano de seguimiento', xaxis_title='Tiempo simulado (s)',
+                               yaxis_title='Error (mm)')
+    with st.expander('Ver gráficas de comparación'):
+        st.plotly_chart(figura_xy, use_container_width=True)
+        st.plotly_chart(figura_error, use_container_width=True)
+
+
+with panel_evaluacion:
+    st.subheader('Evaluación de la trayectoria')
+    if kpi is None:
+        st.info(rechazo_kpi or 'No hay una evaluación disponible.')
+    else:
+        criterios = kpi['criterios']
+        cumplidos = sum(criterios.values())
+        st.progress(cumplidos / len(criterios), text=f'{cumplidos / len(criterios):.0%} de criterios cumplidos · '
+                    f'{"Éxito" if kpi["exito"] else "Sin éxito"}')
+        st.caption('Cumplimiento de tres criterios; no es una probabilidad ni una medición física.')
+        for clave, etiqueta, valor, limite, unidad in (
+            ('llegada', 'Error final', kpi['error_final'], TOLERANCIA_FINAL_MM, 'mm'),
+            ('velocidad', 'Velocidad máxima', kpi['vel_max'], VEL_MAX_DEG_S, '°/s'),
+            ('aceleracion', 'Aceleración máxima', kpi['acel_max'], ACEL_MAX_DEG_S2, '°/s²'),
+        ):
+            estado_criterio = 'Cumple' if criterios[clave] else 'No cumple'
+            st.write(f'**{etiqueta}:** {valor:.2f} {unidad} / ≤ {limite:g} {unidad} — {estado_criterio}')
+        st.caption('Picos discretos con reposo supuesto en los extremos; periodo de simulación 0,02 s.')
+    st.divider()
+    st.subheader('Comparación de controladores')
+    comparacion = st.session_state.get('comparacion_control_sg90')
+    firma_comparacion = None
+    if kpi is not None:
+        referencia = np.asarray([c['q_d'] for c in cuadros], dtype=float)
+        huella = hashlib.sha256(referencia.tobytes() + st.session_state.robot_inicio_calculado.tobytes()).hexdigest()
+        firma_comparacion = (firma_robot, huella)
+    if comparacion and comparacion['firma'] != firma_comparacion:
+        st.session_state.pop('comparacion_control_sg90')
+        comparacion = None
+    if st.button('Comparar controladores', key='comparar_controladores_sg90', disabled=kpi is None):
+        try:
+            resultados = comparar_controladores(
+                st.session_state.robot_inicio_calculado, referencia, (Kp, Kd, Ki), dt, ruta_efector, simular,
+            )
+        except ValueError as exc:
+            st.session_state.pop('comparacion_control_sg90', None)
+            st.error(f'No se pudo comparar los controladores: {exc}')
+            comparacion = None
+        else:
+            comparacion = {'firma': firma_comparacion, 'resultados': resultados}
+            st.session_state.comparacion_control_sg90 = comparacion
+    if comparacion:
+        _mostrar_comparador_control(comparacion['resultados'])
+    elif kpi is not None:
+        st.caption('Compara Cinemático, PID y PID + Feedforward con la misma referencia.')
 
 
 @st.cache_data
